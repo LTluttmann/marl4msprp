@@ -10,58 +10,8 @@ from marlprp.models.nn.misc import MLP
 from marlprp.models.policy_args import TransformerParams
 from marlprp.utils.ops import gather_by_index
 from marlprp.models.decoder.base import BasePointer
-from marlprp.models.encoder.base import OperationsEncoderOutput, MatNetEncoderOutput
+from marlprp.models.encoder.base import MatNetEncoderOutput
 from marlprp.models.nn.misc import MHAWaitOperationEncoder
-
-
-class JobPointer(BasePointer):
-    def __init__(self, params: TransformerParams) -> None:
-        super().__init__()
-        self.input_dim = params.embed_dim
-
-        self.final_trf_block = TransformerEncoderLayer(
-            d_model=self.input_dim,
-            nhead=params.num_heads,
-            dim_feedforward=params.feed_forward_hidden,
-            dropout=params.dropout,
-            activation=params.activation,
-            norm_first=params.norm_first,
-            batch_first=True,
-        )
-
-        self.mlp = MLP(
-            input_dim=self.input_dim,
-            output_dim=1,
-            num_neurons=[params.embed_dim] * params.num_decoder_ff_layers,
-        )
-
-        self.is_multiagent_policy = params.is_multiagent_policy
-        self.wait_op_encoder = MHAWaitOperationEncoder(self.input_dim, params)
-
-
-    def forward(self, embeddings: OperationsEncoderOutput, td: TensorDict):
-        ops_emb = embeddings["operations"]
-        bs = td.size(0)
-        # (bs, n_jobs, emb)
-        job_emb = gather_by_index(ops_emb, td["next_op"], dim=2)
-        # (bs, 1, emb)
-        wait_emb = self.wait_op_encoder(ops_emb, td)
-        # (bs, n_jobs + 1, emb)
-        job_emb_w_wait = torch.cat((wait_emb, job_emb), dim=1)
-
-        # (bs, jobs) NOTE in the mask, True must refer to infeasible action
-        attn_mask = td["action_mask"].clone()
-        attn_mask[:, 0] = self.is_multiagent_policy
-        attn_mask = ~attn_mask
-
-        job_emb_w_wait = self.final_trf_block(
-            src=job_emb_w_wait, src_key_padding_mask=attn_mask
-        )
-
-        # (bs, jobs)
-        job_logits = self.mlp(job_emb_w_wait).squeeze(-1)
-        logit_mask = ~td["action_mask"]
-        return job_logits, logit_mask
     
 
 class JobMachinePointer(BasePointer):

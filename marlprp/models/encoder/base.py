@@ -10,10 +10,6 @@ class BaseEncoder(nn.Module, metaclass=abc.ABCMeta):
     def forward(self, *args, **kwargs) -> TensorDict:
         pass
 
-
-class OperationsEncoderOutput(TypedDict):
-    operations: Tensor
-
 class MatNetEncoderOutput(TypedDict):
-    operations: Tensor
-    machines: Tensor
+    shelf: Tensor
+    sku: Tensor

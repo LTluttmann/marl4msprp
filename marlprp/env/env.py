@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
@@ -8,12 +10,25 @@ from marlprp.env.instance import MSPRPState
 
 class MSPRPEnv:
 
+    name = "msprp"
+
     def __init__(self, params: EnvParams) -> None:
         self.generator = MSPRPGenerator(params)
         self.params = params
 
-    def reset(self, batch_size):
-        td = self.generator(batch_size)
+
+    def reset(self, td: Optional[TensorDict] = None, batch_size=None) -> MSPRPState:
+        """Reset function to call at the beginning of each episode"""
+        if batch_size is None:
+            batch_size = self.batch_size if td is None else td.batch_size
+        if td is None or td.is_empty():
+            td = self.generator(batch_size=batch_size)
+        batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+
+        return self._reset(td, batch_size=batch_size)
+
+
+    def _reset(self, td: TensorDict, batch_size) -> MSPRPState:
         batch = MSPRPState.initialize(
             num_depots=self.params.num_depots,
             **td,
@@ -21,11 +36,12 @@ class MSPRPEnv:
 
         return batch
 
+
     def step(self, td: TensorDict) -> MSPRPState:
         td = td.clone()
 
-        actions = td["action"]
-        state = td["state"]
+        actions: torch.Tensor = td["action"]
+        state: MSPRPState = td["state"]
 
         actions = actions.split(1, dim=1)
 

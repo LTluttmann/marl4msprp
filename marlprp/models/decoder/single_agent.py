@@ -6,23 +6,22 @@ from torch.distributions import Categorical
 from tensordict import TensorDict
 from einops import rearrange
 
-from marlprp.envs.base import Environment
+from marlprp.env.env import MSPRPEnv
 from marlprp.models.policy_args import TransformerParams
 from marlprp.utils.ops import gather_by_index
 from marlprp.models.decoder.base import BaseDecoder
 
-from .mlp import JobPointer, JobMachinePointer
+from .mlp import JobMachinePointer
 
 
-__all__ = [
-    "JobMLPDecoder",
-    "JobMachineMLPDecoder"
-]
+__all__ = []
 
 class SingleAgentAction(TypedDict):
     idx: torch.Tensor  # the flat (in case of combined action space) action
     job: torch.Tensor
     machine: torch.Tensor
+
+
 
 
 class BaseSingleAgentDecoder(BaseDecoder):
@@ -34,7 +33,7 @@ class BaseSingleAgentDecoder(BaseDecoder):
         self, 
         embeddings: TensorDict, 
         td: TensorDict, 
-        env: Environment, 
+        env: MSPRPEnv, 
         return_logp: bool = False
     ):
         
@@ -61,39 +60,9 @@ class BaseSingleAgentDecoder(BaseDecoder):
         pass
     
     @abc.abstractmethod
-    def _translate_action(self, td: TensorDict, env: Environment) -> SingleAgentAction:
+    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
         pass
     
-
-class JobMLPDecoder(BaseSingleAgentDecoder):
-    def __init__(self, params: TransformerParams) -> None:
-        pointer = JobPointer(params)
-        super().__init__(pointer, params)
-
-    def _logits_to_logp(self, logits, mask):
-        return self.dec_strategy.logits_to_logp(logits, mask)
-    
-    def _translate_action(self, td: TensorDict, env) -> SingleAgentAction:
-        
-        selected_job = td["action"]
-
-        job_next_ma_w_dummy = torch.cat(
-            (torch.full_like(td["job_next_ma"][:, :1], -1), td["job_next_ma"]), 
-            dim=1
-        )
-
-        ma_of_job = job_next_ma_w_dummy.gather(1, selected_job[:, None]).squeeze(1)
-
-        action = TensorDict(
-            {
-                "idx": selected_job, 
-                "job": selected_job, 
-                "machine": ma_of_job,
-            },
-            batch_size=td.batch_size
-        )
-        return action
-
 
 class JobMachineMLPDecoder(BaseSingleAgentDecoder):
     def __init__(self, params: TransformerParams) -> None:
@@ -106,7 +75,7 @@ class JobMachineMLPDecoder(BaseSingleAgentDecoder):
         logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
         return logp, mask
 
-    def _translate_action(self, td: TensorDict, env: Environment) -> SingleAgentAction:
+    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
         # translate and store action
         action = td["action"]
         selected_machine = action % env.num_mas

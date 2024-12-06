@@ -6,6 +6,7 @@ import logging
 import functools
 from typing import Any, Callable, Dict, Type, TypeVar, Union, List
 
+import torch
 from lightning import LightningModule
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
@@ -121,6 +122,10 @@ def determine_devices(devices: Union[List[int], int, str], check_env: bool = Tru
             return [int(os.environ.get("CUDA_VISIBLE_DEVICES"))]
         except:
             raise ValueError(f"Expected a number in CUDA_VISIBLE_DEVICES, got {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        
+    if not torch.cuda.is_available():
+        return "auto"
+    
     idle_gpus = get_free_gpus(mem_limit)
 
     if isinstance(devices, int):
@@ -150,7 +155,10 @@ class RunManager():
             device = [self.locked_device]
         else:
             device = determine_devices(self.cfg.train.devices)
+        
+        accelerator = "gpu" if torch.cuda.is_available() else "cpu"  # TODO support MPS?
         self.cfg.train.devices = device
+        self.cfg.train.accelerator = accelerator
 
     @rank_zero_only
     def _exit(self):
@@ -211,9 +219,9 @@ def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig
     default_tags = [
         model_params.algorithm, 
         policy_params.policy, 
-        env_params.env,
-        f"{env_params.num_jobs}j",
-        f"{env_params.num_machines}m",
+        env_params.name,
+        f"{env_params.num_shelves}j",
+        f"{env_params.num_skus}m",
         "eval_multi" if model_params.eval_multistep else "eval_single",
         "eval_per_agent" if model_params.eval_per_agent else "eval_all",
     ]
@@ -223,7 +231,7 @@ def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig
     return WandbLogger(
         save_dir=hc.runtime.output_dir,
         tags=all_tags,
-        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.env}-{env_params.num_jobs}j-{env_params.num_machines}m",
+        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}j-{env_params.num_skus}m",
         **logger_cfg
     )
 

@@ -5,8 +5,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 
-from rl4co.envs.common.base import RL4COEnvBase
-
+from marlprp.env.env import MSPRPEnv
 from marlprp.utils.config import TrainingParams, ValidationParams, TestParams
 from marlprp.algorithms.base import ManualOptLearningAlgorithm
 from marlprp.algorithms.utils import (
@@ -85,7 +84,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
 
     def __init__(
         self, 
-        env: RL4COEnvBase,
+        env: MSPRPEnv,
         policy: nn.Module,
         model_params: SelfLabelingParameters,
         train_params: TrainingParams,
@@ -107,7 +106,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
             decode_type="sampling", 
             tanh_clipping=train_params.decoding["tanh_clipping"],
             top_p=train_params.decoding["top_p"],
-            temperature=model_params.sl_temperature
+            temperature=model_params.ref_model_temp
         )
         
         rollout_batch_size = model_params.rollout_batch_size or train_params.batch_size
@@ -134,7 +133,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
         self.best_reward = float("-inf")
         self.experience_sampler = SampleGenerator(
             rb=self.rb, 
-            num_iter=model_params.sl_epochs, 
+            num_iter=model_params.inner_epochs, 
             num_samples=model_params.num_batches
         )
         self.eval_multistep = model_params.eval_multistep
@@ -194,23 +193,23 @@ class SelfLabeling(ManualOptLearningAlgorithm):
 
     def training_step(self, batch, batch_idx):
         
-        orig_td = self.env.reset(batch)
-        bs = orig_td.size(0)
-        device = orig_td.device
+        orig_state = self.env.reset(batch)
+        bs = orig_state.size(0)
+        device = orig_state.device
         train_rewards = []
         # data gathering loop
         for i in range(0, bs, self.rollout_batch_size):
 
-            next_td = orig_td[i : i + self.rollout_batch_size]
-            next_td = batchify(next_td, self.num_starts)
-            td_stack = []
+            next_state = orig_state[i : i + self.rollout_batch_size]
+            next_state = batchify(next_state, self.num_starts)
+            state_stack = []
             steps = 0
-            while not next_td["done"].all():
+            while not next_state.done.all():
 
                 with torch.no_grad():
-                    td = self.policy_old.act(next_td, self.env, return_logp=False)
+                    td = self.policy_old.act(next_state, self.env, return_logp=False)
 
-                next_td = self.env.step(td)["next"]
+                next_state = self.env.step(td)["next"]
 
                 if not self.eval_multistep and td["action"].dim() == 2:
                     action = td["action"].clone()
@@ -223,34 +222,34 @@ class SelfLabeling(ManualOptLearningAlgorithm):
                     steps += 1
 
                 # add tensordict to buffer
-                td_stack.append(td)
+                state_stack.append(td)
 
             # (bs * #samples, #steps)
-            td_stack = torch.cat(td_stack, dim=1)
+            state_stack = torch.cat(state_stack, dim=1)
             # (bs, #samples, #steps)
-            td_stack_unbs = unbatchify(td_stack, self.num_starts)
+            states_unbs = unbatchify(state_stack, self.num_starts)
             # (bs * #samples)
-            rewards = self.env.get_reward(next_td, 0.05)
+            rewards = self.env.get_reward(next_state, 0.05)
             train_rewards.append(rewards.mean())
             # (bs, #samples)
             rewards = unbatchify(rewards, self.num_starts)
             # (bs)
             best_rew, best_idx = rewards.max(dim=1)
             # (bs)
-            td_best = td_stack_unbs.gather(
+            best_states = states_unbs.gather(
                 1, best_idx[:, None, None].expand(-1, 1, steps)
             ).squeeze(1)
             # add advantage
             advantage = best_rew - rewards.mean(1, keepdim=False)
             if False:
                 adv_weights = _calc_adv_weights(advantage)
-                td_best["adv_weights"] = adv_weights.unsqueeze(1).expand(*td_best.shape)
+                best_states["adv_weights"] = adv_weights.unsqueeze(1).expand(*best_states.shape)
             # flatten so that every step is an experience
-            td_best = td_best.flatten()
+            best_states = best_states.flatten()
             # filter out steps where the instance is already in terminal state. There is nothing to learn from
-            td_best = td_best[~td_best["done"].squeeze(1)]
+            best_states = best_states[~best_states.done.squeeze(1)]
             # save to memory
-            self.rb.extend(td_best)
+            self.rb.extend(best_states)
 
         train_reward = torch.stack(train_rewards).mean()
         loss = self._update(device)        
@@ -286,11 +285,6 @@ class SelfLabeling(ManualOptLearningAlgorithm):
         # Synchronize the reference policy parameters across all GPUs
         for param in self.policy_old.parameters():
             dist.broadcast(param.data, src=0)
-
-
-
-
-
 
 
 

@@ -1,0 +1,2 @@
+_target_: hydra_plugins.hydra_joblib_launcher.joblib_launcher.JoblibLauncher
+n_jobs: 5  # Number of parallel jobs (match number of GPUs)

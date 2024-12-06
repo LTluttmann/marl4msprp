@@ -26,15 +26,15 @@ def save_config_to_dict(config_struct: Union[OmegaConf, Dict]):
 
 
 @dataclass
-class EnvParams:
-
+class BaseEnvParams:
+    name: str
+    id: str = None
     seed: int = 12345678
 
     num_agents: int = None
     num_depots: Union[List, int] = 2
     num_shelves: Union[List, int] = 10
-    num_skus: Union[List, int] = 20
-
+    
     avg_loc_per_sku: int = None
     num_storage_locations: Optional[int] = None
 
@@ -46,9 +46,7 @@ class EnvParams:
 
     capacity: int = 20
 
-    id: str = None
     is_multi_instance: bool = field(init=False)
-
     packing_ratio_penalty: float = 0.
 
     def __post_init__(self):
@@ -56,6 +54,32 @@ class EnvParams:
             raise NotImplementedError(
                 "Num agents must be the same over all batch instances. Otherwise, padding would be necessary, which is not implemented yet."
             )
+        if self.max_supply is not None and self.avg_supply_to_demand_ratio is not None:
+            log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
+            self.max_supply = None
+
+
+    def __init_subclass__(cls, *args, **kw):
+        super().__init_subclass__(*args, **kw)
+        env_config_registry[cls.name] = cls
+
+    @classmethod
+    def initialize(cls, env: str = None, **kwargs):
+        try:
+            env = env or cls.name
+            Config = env_config_registry[env]
+            return Config(**kwargs)
+        except KeyError:
+            raise ValueError(f"No Config found for environment {env}.")
+        
+
+@dataclass(kw_only=True)
+class EnvParams(BaseEnvParams):
+    name: str = "msprp"
+    num_skus: Union[List, int] = 20
+
+    def __post_init__(self):
+        super().__post_init__()
         if isinstance(self.num_shelves, int):
             self.num_storage_locations = infer_num_storage_locations(
                 self.num_skus, 
@@ -67,10 +91,16 @@ class EnvParams:
         else:
             self.is_multi_instance = True
 
-        if self.max_supply is not None and self.avg_supply_to_demand_ratio is not None:
-            log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
-            self.max_supply = None
-    
+
+@dataclass(kw_only=True)
+class LargeEnvParams(BaseEnvParams):
+    name: str = "xmsprp"
+
+    num_total_skus: Union[List, int] = 200
+    max_sku_per_shelf: int = 20
+    min_sku_per_shelf: int = 1
+
+
 
 
 @dataclass(kw_only=True)

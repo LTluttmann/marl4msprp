@@ -20,7 +20,7 @@ def test_env(num_agents):
 
     env = MSPRPEnv(params)
 
-    tc = env.reset(2)
+    tc = env.reset(batch_size=2)
 
     while not tc.done.all():
         node_mask = env.get_node_mask(tc)

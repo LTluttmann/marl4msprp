@@ -44,7 +44,7 @@ class DistributableSynetheticDataset(Dataset):
         super().__init__()
 
         self.num_samples = num_samples 
-        self.dataset = env.reset(batch_size=self.num_samples)
+        self.dataset = env.generator(batch_size=self.num_samples)
 
     def __len__(self):
         return self.num_samples

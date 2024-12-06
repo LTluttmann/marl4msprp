@@ -1,0 +1,8 @@
+offline: False
+id: null # pass correct id to resume experiment!
+anonymous: null # enable anonymous logging
+project: "msprp"
+log_model: False # upload lightning ckpts
+prefix: "" # a string to put at the beginning of metric keys
+group: ""
+job_type: ""

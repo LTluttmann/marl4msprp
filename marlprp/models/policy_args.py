@@ -23,12 +23,11 @@ class TransformerParams(PolicyParams):
         self.qkv_dim = self.embed_dim // self.num_heads
         assert self.embed_dim % self.num_heads == 0, "self.kdim must be divisible by num_heads"
 
-
-
 @dataclass(kw_only=True)
 class MatNetParams(TransformerParams):
     policy: str = "matnet"
     ms_hidden_dim: int = None
+    mask_no_edge: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -36,23 +35,8 @@ class MatNetParams(TransformerParams):
 
 
 @dataclass(kw_only=True)
-class marlprp4JsParams(TransformerParams):
-    policy: str = "marlprp4js"
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.env.env = "ma_" + self.env.env
-
-@dataclass(kw_only=True)
-class marlprpParams(MatNetParams):
-    policy: str = "marlprp"
+class MahamParams(MatNetParams):
+    policy: str = "maham"
     use_communication: bool = True
     use_rezero: bool = True
 
-    def __post_init__(self):
-        super().__post_init__()
-        self.env.env = "ma_" + self.env.env
-
-@dataclass(kw_only=True)
-class marlprpMLPParams(marlprpParams):
-    policy: str = "marlprp_mlp"

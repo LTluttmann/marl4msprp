@@ -1,0 +1,9 @@
+seed: 12345678
+num_shelves: ???
+num_skus: ???
+num_storage_locations: ???
+num_agents: 5
+min_demand: 0
+max_demand: 4
+min_supply: 1
+avg_supply_to_demand_ratio: 2.0

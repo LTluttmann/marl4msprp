@@ -20,6 +20,18 @@ class NormByConstant(nn.Module):
         x[...,self.static_size:] /= self.const
         return x
 
+
+def min_max_scale(tensor: torch.Tensor, dim=None):
+    tensor = tensor.to(torch.float32)
+    if dim is not None:
+        tensor -= tensor.min(dim, keepdim=True)[0]
+        tensor /= (tensor.max(dim, keepdim=True)[0] + 1e-6)
+    else:
+        tensor -= tensor.min()
+        tensor /= (tensor.max() + 1e-6)
+    return tensor
+
+
 def feature_normalize(data, dim=None):
     keepdim = dim is not None
     mean_feat = torch.mean(data, dim=dim, keepdim=keepdim)

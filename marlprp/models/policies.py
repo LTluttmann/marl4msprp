@@ -1,31 +1,21 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from einops import rearrange
-
-from typing import Literal, Dict, Type
 from tensordict import TensorDict
 from rl4co.envs.common import RL4COEnvBase
 
-from marlprp.models.critic import OperationsCritic
-from marlprp.models.decoder.base import BaseDecoder
-from marlprp.models.decoder import (
-    MultiAgentAttnDecoder, 
-    MultiAgentMLPDecoder, 
-    MultiJobDecoder,
-    JobMachineMLPDecoder,
-    JobMLPDecoder
-)
-from marlprp.models.encoder import OperationsEncoder, MatNetEncoder
-from marlprp.models.policy_args import PolicyParams
 from marlprp.utils.utils import Registry
+from marlprp.env.env import MSPRPEnv
+from marlprp.env.instance import MSPRPState
+from marlprp.models.encoder import MatNetEncoder
+from marlprp.models.policy_args import PolicyParams
+from marlprp.models.decoder.base import BaseDecoder
+from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder
 
 
 policy_registry = Registry()
 
 
-class SchedulingPolicy(nn.Module):
+class RoutingPolicy(nn.Module):
 
     def __init__(self, model_params: PolicyParams):
         super().__init__()  
@@ -72,13 +62,13 @@ class SchedulingPolicy(nn.Module):
 
         return td
 
-    def act(self, td, env, return_logp = True):
-        embeddings = self.encoder(td)
-        td, env, embeddings = self.decoder.pre_decoding_hook(
-            td, env, embeddings
+    def act(self, state: MSPRPState, env: MSPRPEnv, return_logp: bool = True):
+        embeddings = self.encoder(state)
+        state, env, embeddings = self.decoder.pre_decoding_hook(
+            state, env, embeddings
         )
-        td = self.decoder(embeddings, td, env, return_logp=return_logp)
-        return td
+        state = self.decoder(embeddings, state, env, return_logp=return_logp)
+        return state
     
     def evaluate(self, td, env):
 
@@ -113,179 +103,12 @@ class SchedulingPolicy(nn.Module):
         return out
 
 
-@policy_registry.register(name="transformer")
-class TransformerPolicy(SchedulingPolicy):
 
-    def __init__(self, model_params: PolicyParams):
-        super().__init__(model_params)  
-        self.encoder = OperationsEncoder(model_params)
-        self.decoder = JobMLPDecoder(model_params)
-        self.critic = self._critic(model_params)
-
-    def _critic(self, model_params: PolicyParams):
-        if not model_params.use_critic:
-            critic = None
-        else:
-            critic = OperationsCritic(model_params)
-        return critic
-
-
-
-@policy_registry.register(name="matnet")
-class MatNetPolicy(SchedulingPolicy):
+@policy_registry.register(name="maham")
+class MatNetPolicy(RoutingPolicy):
 
     def __init__(self, model_params: PolicyParams):
         super().__init__(model_params)  
         self.encoder = MatNetEncoder(model_params)
-        self.decoder = JobMachineMLPDecoder(model_params)
+        self.decoder = HierarchicalMultiAgentDecoder(model_params)
         self.critic = None
-
-
-@policy_registry.register(name="marlprp4js")
-class marlprpPolicy4JS(SchedulingPolicy):
-
-    def __init__(self, model_params: PolicyParams):
-        super().__init__(model_params)  
-        self.emb_dim = model_params.embed_dim
-        self.encoder = OperationsEncoder(model_params)
-        self.decoder = MultiJobDecoder(model_params)
-        self.critic = None
-    
-
-@policy_registry.register(name="marlprp")
-class marlprpPolicy(SchedulingPolicy):
-
-    def __init__(self, model_params: PolicyParams):
-        super().__init__(model_params)  
-        self.emb_dim = model_params.embed_dim
-        self.encoder = MatNetEncoder(model_params)
-        self.decoder = MultiAgentAttnDecoder(model_params)
-        self.critic = None
-
-
-@policy_registry.register(name="marlprp_mlp")
-class marlprpMLPPolicy(SchedulingPolicy):
-
-    def __init__(self, model_params: PolicyParams):
-        super().__init__(model_params)  
-        self.emb_dim = model_params.embed_dim
-        self.encoder = MatNetEncoder(model_params)
-        self.decoder = MultiAgentMLPDecoder(model_params)
-        self.critic = None
-    
-
-
-#######################################################
-################ RANDOM POLICIES ######################
-#######################################################
-
-
-def random_jssp_policy(td: TensorDict):
-    logits = torch.randn(td["action_mask"].shape)
-    mask = td["action_mask"].clone()
-    logits_masked = logits.masked_fill(~mask, -torch.inf)
-    probs = F.softmax(logits_masked, dim=1)
-    action = probs.multinomial(1).squeeze(1)
-    td.set("action", action)
-    return td
-
-
-def random_multi_agent_jssp_policy(td: TensorDict):
-    """Helper function to select a random action from available actions"""
-    logits = torch.randn(td["action_mask"].shape)
-    mask = td["action_mask"].clone()
-    bs, num_mas, num_jobs_plus_one = mask.shape
-    batch_idx = torch.arange(0, bs, device=td.device)
-
-    temp = 1.0
-    idle_machines = torch.arange(0, num_mas, device=td.device)[None,:].expand(bs, -1)
-
-    # initialize action buffer
-    actions = torch.zeros(size=(bs, num_mas), device=td.device, dtype=torch.long)
-    while mask.any():
-
-        logits_masked = logits.masked_fill(~mask, -torch.inf)
-        logits_reshaped = rearrange(logits_masked, "b m j -> b (j m)") / temp
-        logp = F.softmax(logits_reshaped, dim=1)
-
-        action = logp.multinomial(1).squeeze(1)
-
-        selected_machine = action % num_mas
-        selected_job = action // num_mas
-        actions[batch_idx, selected_machine] = selected_job
-
-        idle_machines = (
-            idle_machines[idle_machines!=selected_machine[:, None]]
-            .view(bs, -1)
-        )
-
-        mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), False)
-        mask[..., 0] = mask[..., 0].scatter(-1, idle_machines.view(bs, -1), True)
-        mask = mask.scatter(-2, selected_machine.view(bs, 1, 1).expand(-1, 1, num_jobs_plus_one), False)
-
-    # actions = torch.stack(actions, dim=1)
-    td.set("action", actions)
-    return td
-
-
-def random_fjsp_policy(td: TensorDict):
-    bs, nj, nm = td["action_mask"].shape
-    # (bs, job, ma)
-    job_ma_logits = torch.randn(td["action_mask"].shape)
-    mask = td["action_mask"].clone()
-    logits_masked = job_ma_logits.masked_fill(~mask, -torch.inf)
-    logits_reshapde = rearrange(logits_masked, "b j m -> b (j m)")
-    probs = F.softmax(logits_reshapde, dim=1)
-    action = probs.multinomial(1).squeeze(1)
-    job = action // nm
-    ma = action % nm
-    action = TensorDict({
-        "job": job,
-        "machine": ma
-    })
-    td.set("action", action)
-    return td
-
-
-def random_multi_agent_fjsp_policy(td: TensorDict):
-    """Helper function to select a random action from available actions"""
-    logits = torch.randn(td["action_mask"].shape)
-    mask = td["action_mask"].clone()
-    bs, num_mas, num_jobs_plus_one = mask.shape
-    batch_idx = torch.arange(0, bs, device=td.device)
-
-    temp = 1.0
-    idle_machines = torch.arange(0, num_mas, device=td.device)[None,:].expand(bs, -1)
-
-    # initialize action buffer
-    actions = []
-    while mask.any():
-
-        logits_masked = logits.masked_fill(~mask, -torch.inf)
-        logits_reshaped = rearrange(logits_masked, "b m j -> b (j m)") / temp
-        logp = F.softmax(logits_reshaped, dim=1)
-
-        action = logp.multinomial(1).squeeze(1)
-
-        selected_machine = action % num_mas
-        selected_job = action // num_mas
-        actions.append(TensorDict(
-            {
-                "job": selected_job,
-                "machine": selected_machine
-            },
-            batch_size=td.batch_size
-        ))
-
-        idle_machines = (
-            idle_machines[idle_machines!=selected_machine[:, None]]
-            .view(bs, -1)
-        )
-
-        mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), False)
-        mask[..., 0] = mask[..., 0].scatter(-1, idle_machines.view(bs, -1), True)
-        mask = mask.scatter(-2, selected_machine.view(bs, 1, 1).expand(-1, 1, num_jobs_plus_one), False)
-
-    actions = torch.stack(actions, dim=1)
-    td.set("action", actions)
-    return td

@@ -1,0 +1,42 @@
+# @package _global_
+defaults:
+  - _self_
+  - callbacks: default.yaml
+  - hydra: default.yaml # having hydra before logger in precedence order, so that logger can override run.dir
+  - logger: wandb
+  - paths: default.yaml
+  - env: 10s-3i-20p.yaml
+  - model: sl
+  - policy: null
+
+# model:
+#   ref: ${policy.policy}_${model.algorithm}
+run_name: ${env.num_shelves}s-${env.num_skus}i-${env.num_storage_locations}p
+
+train:  
+  train: true
+  dataset_size: 2000
+  batch_size: 200
+  lr_scheduler:
+    "MultiStepLR"
+  lr_scheduler_kwargs:
+    milestones: [35]
+    gamma: 0.1
+  optimizer_kwargs:
+    policy_lr: 5e-4
+    weight_decay: 1e-6
+  max_grad_norm: 2.0
+  epochs: 30
+  devices: "auto"
+  accelerator: "auto"
+
+val:
+  dataset_size: 3000
+  batch_size: 1000
+  decode_type: greedy
+
+test:
+  dataset_size: 1000
+  batch_size: 64
+  num_decoding_samples: 100
+  decode_type: sampling

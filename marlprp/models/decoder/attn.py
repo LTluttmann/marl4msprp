@@ -6,12 +6,13 @@ from tensordict import TensorDict
 from einops import rearrange, einsum
 import math
 
+from marlprp.env.instance import MSPRPState
 from marlprp.models.encoder.base import MatNetEncoderOutput
 from marlprp.models.nn.misc import MHAWaitOperationEncoder
 from marlprp.models.decoder.base import BasePointer
-from marlprp.models.policy_args import TransformerParams, marlprpParams
+from marlprp.models.policy_args import TransformerParams, MahamParams
 from marlprp.utils.ops import gather_by_index
-from marlprp.models.nn.dynamic import get_dynamic_emb
+from marlprp.models.nn.kvl import get_kvl_emb
 from marlprp.models.nn.context import get_context_emb
 
 
@@ -36,7 +37,7 @@ class AttentionPointerMechanism(nn.Module):
         check_nan: whether to check for NaNs in logits
     """
 
-    def __init__(self, params: marlprpParams, check_nan=True):
+    def __init__(self, params: MahamParams, check_nan=True):
         super(AttentionPointerMechanism, self).__init__()
         self.num_heads = params.num_heads
         # Projection - query, key, value already include projections
@@ -101,7 +102,7 @@ class AttentionPointer(BasePointer):
         self,
         params: TransformerParams,
         check_nan: bool = True,
-        dyn_emb_key: str = None
+        decoder_type: str = None
     ):
         super(AttentionPointer, self).__init__()
         self.model_params = params
@@ -111,76 +112,31 @@ class AttentionPointer(BasePointer):
         self.stepwise_encoding = params.stepwise_encoding
 
         self.Wq = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
-        self.Wkvl = nn.Linear(self.emb_dim, 3 * self.emb_dim, bias=False)
         self.pointer = AttentionPointerMechanism(params, check_nan)
 
-        self.context_embedding = get_context_emb(params, extra_key=dyn_emb_key)
-        self.dynamic_embedding = get_dynamic_emb(params, key=dyn_emb_key)
+        self.context_embedding = get_context_emb(params, key=decoder_type)
+        self.kvl_emb = get_kvl_emb(params, key=decoder_type)
 
         self.cache = None
-        self.wait_op_encoder = MHAWaitOperationEncoder(self.emb_dim, params)
+
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-    def compute_cache(self, tgt_emb: Tensor) -> None:
+    def compute_cache(self, embs: MatNetEncoderOutput) -> None:
         # shape: 3 * (bs, n, emb_dim)
-        self.cache = self.Wkvl(tgt_emb).chunk(3, dim=-1)
+        self.cache = self.kvl_emb.compute_cache(embs)
 
-    def _compute_kvl(self, td, tgt_emb: Tensor):
+    def forward(self, embs: MatNetEncoderOutput, state: MSPRPState, attn_mask: Tensor = None):
 
-        glimpse_k_dyn, glimpse_v_dyn, logit_k_dyn = self.dynamic_embedding(td, tgt_emb)
-
-        if self.cache is not None:
-            # gather static keys, values and logit keys
-            wait_emb = self.wait_op_encoder(tgt_emb, td)
-            cache = tuple(map(
-                lambda x: gather_by_index(x, td["next_op"], dim=2), 
-                self.cache
-            ))
-            k, v, l = tuple(map(lambda x: torch.cat((wait_emb, x), dim=1), cache))
-            
-        else:
-            # dynamically compute keys, values and logit keys
-            wait_emb = self.wait_op_encoder(tgt_emb, td)
-            tgt_emb = gather_by_index(tgt_emb, td["next_op"], dim=2)
-            # (bs, n_jobs + 1, emb)
-            tgt_emb_w_wait = torch.cat((wait_emb, tgt_emb), dim=1)
-            k, v, l = self.Wkvl(tgt_emb_w_wait).chunk(3, dim=-1)
-
-        k_dyn = k + glimpse_k_dyn
-        v_dyn = v + glimpse_v_dyn
-        l_dyn = l + logit_k_dyn
-
-        return k_dyn, v_dyn, l_dyn
-
-
-    def forward(self, embs: MatNetEncoderOutput, td: TensorDict, attn_mask: Tensor = None):
-        src_emb = embs["machines"]
-        tgt_emb = embs["operations"]
         # (bs, m, emb)
-        q = self.context_embedding(td, src_emb)
+        q = self.context_embedding(embs, state)
 
         # (bs, heads, nodes, key_dim) | (bs, heads, nodes, key_dim)  |  (bs, nodes, emb_dim)
-        k, v, logit_key = self._compute_kvl(td, tgt_emb)
+        k, v, logit_key = self.kvl_emb(embs, state)
 
         logits = self.pointer(q, k, v, logit_key, attn_mask=attn_mask)
 
         return logits, attn_mask
 
-
-class MultiAgentAttentionPointer(AttentionPointer):
-
-    def __init__(self, params: marlprpParams):
-
-        super(MultiAgentAttentionPointer, self).__init__(params, check_nan=False)
-        
-    
-    def forward(self, embs: MatNetEncoderOutput, td: TensorDict):
-        attn_mask = td["action_mask"].clone()
-        attn_mask[..., 0] = True
-
-        logits, _ = super().forward(embs, td, attn_mask=attn_mask)
-        logit_mask = ~td["action_mask"]
-        return logits, logit_mask

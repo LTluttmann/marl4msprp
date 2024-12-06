@@ -1,0 +1,24 @@
+# @package _global_
+model:
+  algorithm: sl
+  inner_epochs: 5
+    # - 4
+    # - 8
+    # - 1.2
+  eval_per_agent: False
+  eval_multistep: True
+  loss: list
+  listnet_alpha: 0.0
+
+# callbacks:
+#   # batch_size_finder:
+#   #   _target_: esel.utils.callbacks.RolloutBatchSizeFinder
+#   #   mode: "power"
+#   #   steps_per_trial: 1
+#   #   init_val: 2
+#   #   max_trials: 25
+#   #   batch_arg_name: train_batch_size
+
+#   validation_scheduler:
+#     _target_: esel.utils.callbacks.ValidationScheduler
+#     warmup_epochs_n: 0

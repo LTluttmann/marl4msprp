@@ -17,7 +17,7 @@ from rl4co.utils import pylogger
 from marlprp.utils.dataset import EnvLoader
 from marlprp.utils.utils import monitor_lr_changes
 from marlprp.utils.config import TrainingParams, ValidationParams, TestParams, save_config_to_dict
-from marlprp.models.policies import SchedulingPolicy
+from marlprp.models.policies import RoutingPolicy
 from marlprp.algorithms.model_args import ModelParams
 
 
@@ -35,7 +35,7 @@ class LearningAlgorithm(LightningModule, metaclass=abc.ABCMeta):
     def __init__(
         self, 
         env: RL4COEnvBase,
-        policy: SchedulingPolicy,
+        policy: RoutingPolicy,
         model_params: ModelParams,
         train_params: TrainingParams,
         val_params: ValidationParams,
@@ -145,11 +145,19 @@ class LearningAlgorithm(LightningModule, metaclass=abc.ABCMeta):
 
     # PyTorch Lightning's train_dataloader and val_dataloader for data loading
     def train_dataloader(self):
-        train_dl = EnvLoader(env=self.env, dataset_params=self.train_params, n_devices=self.n_devices)
+        train_dl = EnvLoader(
+            env=self.env, 
+            batch_size=self.train_params.batch_size,
+            dataset_size=self.train_params.dataset_size
+        )
         return train_dl
 
     def val_dataloader(self):
-        val_dl = EnvLoader(env=self.env, dataset_params=self.val_params, n_devices=self.n_devices)
+        val_dl = EnvLoader(
+            env=self.env, 
+            batch_size=self.val_params.batch_size,
+            dataset_size=self.val_params.dataset_size,
+        )
         return val_dl
     
     def test_dataloader(self):
@@ -173,10 +181,10 @@ class LearningAlgorithm(LightningModule, metaclass=abc.ABCMeta):
             test_loader = []
 
         test_loader.append(
-                EnvLoader(
+            EnvLoader(
                 env=self.env,
-                dataset_params=self.test_params,
-                n_devices=self.n_devices
+                batch_size=self.test_params.batch_size,
+                dataset_size=self.test_params.dataset_size
             )
         )
 
@@ -233,7 +241,7 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
     def __init__(
             self, 
             env: RL4COEnvBase, 
-            policy: SchedulingPolicy, 
+            policy: RoutingPolicy, 
             model_params: ModelParams, 
             train_params: TrainingParams, 
             val_params: ValidationParams, 

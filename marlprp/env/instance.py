@@ -11,8 +11,8 @@ class MSPRPState:
     coordinates: torch.Tensor
     current_location: torch.Tensor
     remaining_capacity: torch.Tensor
-    tour_length: torch.Tensor = field(init=False)
-    packing_items: torch.Tensor = field(init=False)
+    tour_length: torch.Tensor = None
+    packing_items: torch.Tensor = None
 
     @classmethod
     def initialize(
@@ -23,6 +23,8 @@ class MSPRPState:
         coordinates: torch.Tensor,
         current_location: torch.Tensor,
         remaining_capacity: torch.Tensor,
+        tour_length = None,
+        packing_items = None
     ):
         batch_size = supply.size(0)
         return cls(
@@ -32,12 +34,16 @@ class MSPRPState:
             coordinates=coordinates,
             current_location=current_location,
             remaining_capacity=remaining_capacity,
-            batch_size=[batch_size]
+            batch_size=[batch_size],
+            tour_length=tour_length,
+            packing_items=packing_items,
         )
     
     def __post_init__(self):
-        self.tour_length = torch.zeros((*self.batch_size, self.num_agents), dtype=torch.float32, device=self.device)
-        self.packing_items = torch.zeros((*self.batch_size, self.num_depots), dtype=torch.float32, device=self.device)
+        if self.tour_length is None:
+            self.tour_length = torch.zeros((*self.batch_size, self.num_agents), dtype=torch.float32, device=self.device)
+        if self.packing_items is None:
+            self.packing_items = torch.zeros((*self.batch_size, self.num_depots), dtype=torch.float32, device=self.device)
     
     @property
     def num_shelves(self):
@@ -53,7 +59,7 @@ class MSPRPState:
 
     @property
     def num_agents(self):
-        return self.current_location.size(1)
+        return self.current_location.size(-1)
 
     @property
     def supply_w_depot(self):
