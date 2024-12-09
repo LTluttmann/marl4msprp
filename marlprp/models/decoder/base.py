@@ -32,7 +32,7 @@ class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def get_logp_of_action(self, embeddings, actions: TensorDict, state: MSPRPState):
+    def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
         pass
 
 

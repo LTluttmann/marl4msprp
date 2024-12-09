@@ -33,34 +33,34 @@ class RoutingPolicy(nn.Module):
 
     def forward(
             self, 
-            td: TensorDict, 
+            state: MSPRPState, 
             env: RL4COEnvBase, 
             return_actions: bool = False
         ):
         # encoding once
-        embeddings = self.encoder(td)
+        embeddings = self.encoder(state)
         # pre decoding
-        td, env, embeddings = self.decoder.pre_decoding_hook(td, env, embeddings)
+        state, env, embeddings = self.decoder.pre_decoding_hook(state, env, embeddings)
 
-        while not td["done"].all():
+        while not state.done.all():
             # autoregressive decoding
-            td = self.decoder(embeddings, td, env)
-            td = env.step(td)["next"]
+            state = self.decoder(embeddings, state, env)["next"]
             if self.stepwise_encoding:
-                embeddings = self.encoder(td)
+                embeddings = self.encoder(state)
 
         # gather all logps
-        log_ps, actions, td, env = self.decoder.post_decoding_hook(td, env)
+        log_ps, actions, state, env = self.decoder.post_decoding_hook(state, env)
         # prepare return td
-        td.update({
-            "reward": env.get_reward(td),
+        return_dict = {
+            "state": state,
+            "reward": env.get_reward(state),
             "log_likelihood": log_ps.sum(1),
-        })
+        }
 
         if return_actions:
-            td.set("actions", actions)
+            return_dict["actions"] = actions
 
-        return td
+        return TensorDict(return_dict, batch_size=state.batch_size)
 
     def act(self, state: MSPRPState, env: MSPRPEnv, return_logp: bool = True):
         embeddings = self.encoder(state)
@@ -73,6 +73,7 @@ class RoutingPolicy(nn.Module):
     def evaluate(self, td: TensorDict, env):
         state: MSPRPState = td["state"]
         actions: TensorDict = td["action"]
+        action_masks: TensorDict = td["action_mask"]
         # Encoder: get encoder output and initial embeddings from initial state
         embeddings = self.encoder(state)
 
@@ -85,7 +86,7 @@ class RoutingPolicy(nn.Module):
         state, env, embeddings = self.decoder.pre_decoding_hook(
             state, env, embeddings
         )
-        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, actions, state)
+        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, actions, action_masks, state)
 
         return action_logprobs, value_pred, entropies, mask
 

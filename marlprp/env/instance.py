@@ -13,9 +13,9 @@ class MSPRPState:
     remaining_capacity: torch.Tensor
     tour_length: torch.Tensor = None
     packing_items: torch.Tensor = None
-    shelf_mask: torch.Tensor = None
-    sku_mask: torch.Tensor = None
-    _is_intermediate: str = "False"
+    # shelf_mask: torch.Tensor = None
+    # sku_mask: torch.Tensor = None
+    # _is_intermediate: str = "False"
 
     @classmethod
     def initialize(
@@ -48,20 +48,20 @@ class MSPRPState:
         if self.packing_items is None:
             self.packing_items = torch.zeros((*self.batch_size, self.num_depots), dtype=torch.float32, device=self.device)
     
-    @property
-    def is_intermediate(self):
-        return eval(self._is_intermediate)
+    # @property
+    # def is_intermediate(self):
+    #     return eval(self._is_intermediate)
     
-    @is_intermediate.setter
-    def is_intermediate(self, value):
-        self._is_intermediate = str(value)
+    # @is_intermediate.setter
+    # def is_intermediate(self, value):
+    #     self._is_intermediate = str(value)
 
-    @property
-    def action_mask(self):
-        if self.is_intermediate:
-            return self.sku_mask
-        else:
-            return self.shelf_mask
+    # @property
+    # def action_mask(self):
+    #     if self.is_intermediate:
+    #         return self.sku_mask
+    #     else:
+    #         return self.shelf_mask
 
     @property
     def num_shelves(self):

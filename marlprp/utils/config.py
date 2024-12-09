@@ -112,12 +112,12 @@ class PolicyParams:
     num_encoder_layers: int = 4
     dropout: float = 0.0
     normalization: Literal["batch", "instance"] = "instance"
-    eval_multistep: bool = field(init=False)
+    eval_multistep: bool = True # field(init=False)
     eval_per_agent: bool = field(init=False)
     # to be specified by the learning algorithm
     _use_critic: bool = False
     _stepwise_encoding: bool = field(init=False)
-    is_multiagent_policy: bool = False
+    is_multiagent_policy: bool = True
     max_steps: int = None
 
     def __init_subclass__(cls, *args, **kw):

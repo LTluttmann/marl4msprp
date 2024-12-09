@@ -95,13 +95,15 @@ class LearningAlgorithm(LightningModule, metaclass=abc.ABCMeta):
 
     # PyTorch Lightning's built-in validation_step method
     def validation_step(self, batch, batch_idx):
-        reward = self.policy(batch, self.env)["reward"]
+        state = self.env.reset(batch)
+        reward = self.policy(state, self.env)["reward"]
         self.validation_step_rewards.append(reward)
         self.log("val/reward", reward.mean(), prog_bar=True, on_epoch=True, sync_dist=True)
     
     # PyTorch Lightning's built-in test_step method
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        test_reward = self.policy(batch, self.env)["reward"]
+        state = self.env.reset(batch)
+        test_reward = self.policy(state, self.env)["reward"]
         test_set_name = self.test_set_names[dataloader_idx]
         self.log(
             f"test/{test_set_name}/reward", 

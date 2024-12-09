@@ -33,7 +33,7 @@ class MSPRPEnv:
             num_depots=self.params.num_depots,
             **td,
         )
-        state.shelf_mask = self.get_node_mask(state)
+        # state.shelf_mask = self.get_node_mask(state)
         return state
 
 
@@ -50,11 +50,11 @@ class MSPRPEnv:
 
             if shelf is not None:
                 state = self._update_from_shelf(state, shelf, current_agent=agent)
-                state.sku_mask = self.get_sku_mask(state)
+                #state.sku_mask = self.get_sku_mask(state)
 
             if sku is not None:
                 state = self._update_from_sku(state, sku, curr_agent=agent)
-                state.shelf_mask = self.get_node_mask(state)
+                #state.shelf_mask = self.get_node_mask(state)
 
         return state
 
@@ -83,7 +83,7 @@ class MSPRPEnv:
         # reset remaining load when at depot
         state.remaining_capacity[at_depot, depot_agent] = self.params.capacity
         # after shelf selection the state is in an intermediate phase
-        state.is_intermediate = True
+        # state.is_intermediate = True
         return state
 
     def _update_from_sku(self, state: MSPRPState, chosen_sku: torch.Tensor, curr_agent: torch.Tensor):
@@ -119,7 +119,7 @@ class MSPRPEnv:
         state.remaining_capacity[visit, agent] -= taken_units   
         state.demand[visit, chosen_sku] -= taken_units
         # full transition completed from sku selection
-        state.is_intermediate = False
+        # state.is_intermediate = False
         # reset remaining load when at depot
         # state.remaining_capacity[depot, curr_agent[depot]] = self.params.capacity
 
