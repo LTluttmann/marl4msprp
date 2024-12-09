@@ -208,8 +208,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
 
                 with torch.no_grad():
                     td = self.policy_old.act(next_state, self.env, return_logp=False)
-
-                next_state = self.env.step(td)["next"]
+                    next_state = td.pop("next")
 
                 if not self.eval_multistep and td["action"].dim() == 2:
                     action = td["action"].clone()
@@ -229,7 +228,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
             # (bs, #samples, #steps)
             states_unbs = unbatchify(state_stack, self.num_starts)
             # (bs * #samples)
-            rewards = self.env.get_reward(next_state, 0.05)
+            rewards = self.env.get_reward(next_state)
             train_rewards.append(rewards.mean())
             # (bs, #samples)
             rewards = unbatchify(rewards, self.num_starts)
@@ -247,7 +246,7 @@ class SelfLabeling(ManualOptLearningAlgorithm):
             # flatten so that every step is an experience
             best_states = best_states.flatten()
             # filter out steps where the instance is already in terminal state. There is nothing to learn from
-            best_states = best_states[~best_states.done.squeeze(1)]
+            best_states = best_states[~best_states["state"].done]
             # save to memory
             self.rb.extend(best_states)
 

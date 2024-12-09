@@ -138,5 +138,5 @@ class AttentionPointer(BasePointer):
 
         logits = self.pointer(q, k, v, logit_key, attn_mask=attn_mask)
 
-        return logits, attn_mask
+        return logits
 

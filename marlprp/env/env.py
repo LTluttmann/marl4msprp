@@ -25,24 +25,21 @@ class MSPRPEnv:
             td = self.generator(batch_size=batch_size)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
 
-        return self._reset(td, batch_size=batch_size)
+        return self._reset(td)
 
 
-    def _reset(self, td: TensorDict, batch_size) -> MSPRPState:
-        batch = MSPRPState.initialize(
+    def _reset(self, td: TensorDict) -> MSPRPState:
+        state = MSPRPState.initialize(
             num_depots=self.params.num_depots,
             **td,
         )
+        state.shelf_mask = self.get_node_mask(state)
+        return state
 
-        return batch
 
-
-    def step(self, td: TensorDict) -> MSPRPState:
-        td = td.clone()
-
-        actions: torch.Tensor = td["action"]
-        state: MSPRPState = td["state"]
-
+    def step(self, actions: torch.Tensor, state: MSPRPState) -> MSPRPState:
+        state = state.clone()
+        
         actions = actions.split(1, dim=1)
 
         for action in actions:
@@ -53,9 +50,11 @@ class MSPRPEnv:
 
             if shelf is not None:
                 state = self._update_from_shelf(state, shelf, current_agent=agent)
+                state.sku_mask = self.get_sku_mask(state)
 
             if sku is not None:
-                state = self._update_from_sku(state, sku, agent)
+                state = self._update_from_sku(state, sku, curr_agent=agent)
+                state.shelf_mask = self.get_node_mask(state)
 
         return state
 
@@ -78,8 +77,13 @@ class MSPRPEnv:
         # if agent returns to packing station, record how many items need to be packed at packing station
         at_depot = next_node.lt(self.params.num_depots)
         depot_id = next_node[at_depot]
+        depot_agent = current_agent[at_depot]
         load = self.params.capacity - state.remaining_capacity.gather(1, current_agent[:, None]).squeeze(1)
         state.packing_items[at_depot, depot_id] += load[at_depot]
+        # reset remaining load when at depot
+        state.remaining_capacity[at_depot, depot_agent] = self.params.capacity
+        # after shelf selection the state is in an intermediate phase
+        state.is_intermediate = True
         return state
 
     def _update_from_sku(self, state: MSPRPState, chosen_sku: torch.Tensor, curr_agent: torch.Tensor):
@@ -95,8 +99,8 @@ class MSPRPEnv:
 
         depot = state.agent_at_depot(curr_agent)
         visit = ~depot
-
-        chosen_sku = chosen_sku[visit]
+        # subtract 1 for dummy item
+        chosen_sku = chosen_sku[visit] - 1
         agent = curr_agent[visit]
         remaining_capacity = state.remaining_capacity[visit, agent]
         #state = state.masked_select(visit)
@@ -114,9 +118,10 @@ class MSPRPEnv:
         state.supply[visit, shelf_idx, chosen_sku] -= taken_units
         state.remaining_capacity[visit, agent] -= taken_units   
         state.demand[visit, chosen_sku] -= taken_units
-
+        # full transition completed from sku selection
+        state.is_intermediate = False
         # reset remaining load when at depot
-        state.remaining_capacity[depot, curr_agent[depot]] = self.params.capacity
+        # state.remaining_capacity[depot, curr_agent[depot]] = self.params.capacity
 
         return state
 
@@ -141,11 +146,10 @@ class MSPRPEnv:
         mask_depot = mask_depot[..., None].expand(-1, state.num_agents, state.num_depots)
         # (bs, num_agents, num_nodes)
         agent_node_mask = torch.cat((mask_depot, mask_loc_per_agent), 2).bool()
-
         return agent_node_mask
 
 
-    def get_item_mask_from_node(self, state: MSPRPState, chosen_node: torch.Tensor):
+    def get_sku_mask(self, state: MSPRPState, chosen_nodes: TensorDict = None):
         """
         Gets a (batch_size, n_items+1) mask with the feasible actions depending on item supply at visited 
         shelf and item demand. 0 = feasible, 1 = infeasible
@@ -157,31 +161,37 @@ class MSPRPEnv:
         # [BS]
         # lets assume that, after selecting a shelf, we first update the state and then
         # select an item. This is much cleaner i think
+        nodes = state.current_location.split(1, dim=1)
+        # agents = chosen_nodes["agent"]
+        # assert torch.allclose(torch.arange(agents.size(1)).view(1, -1).expand_as(agents), agents)
+        sku_masks = []
+        for node in nodes:
 
-        if len(chosen_node.shape) > 1:
-            chosen_node = chosen_node.squeeze(1)
+            node = node.squeeze(1)
+            depot = node.lt(state.num_depots) # [BS]
+            visit = ~depot # [BS]
+            # [BS, 1]
+            shelf = node[visit, None, None] - state.num_depots
+            # [bs, skus]
+            supply_at_chosen_node = state.supply[visit].gather(
+                1, shelf.expand(-1, 1, state.num_skus)
+            ).squeeze(1)
+            # [bs, skus]
+            supply_mask = supply_at_chosen_node.eq(0)
+            # [bs, skus]
+            demand_mask = state.demand[visit].eq(0)
 
-        depot = chosen_node.lt(self.params.num_depots) # [BS]
-        visit = ~depot # [BS]
-        # [BS, 1]
-        shelf = chosen_node[visit, None, None] - self.params.num_depots
-        # [bs, skus]
-        supply_at_chosen_node = state.supply[visit].gather(
-            1, shelf.expand(-1,1, state.num_skus)
-        ).squeeze(1)
-        # [bs, skus]
-        supply_mask = supply_at_chosen_node.eq(0)
-        # [bs, skus]
-        demand_mask = state.demand[visit].eq(0)
+            mask = torch.zeros_like(state.demand, dtype=torch.bool)
+            mask[depot] = True
+            mask[visit] = torch.logical_or(supply_mask, demand_mask)
 
-        mask = torch.zeros_like(state.demand, dtype=torch.int32)
-        mask[depot] = 1
-        mask[visit] = torch.logical_or(supply_mask, demand_mask).int()
+            # add one dimension for a dummy item which can be chosen when at the depot
+            mask = torch.cat((visit[:,None], mask), dim=1)
 
-        # add one dimension for a dummy item which can be chosen when at the depot
-        mask = torch.cat((visit[:,None].int(), mask), dim=1)
+            sku_masks.append(mask)
 
-        return mask.bool()
+        sku_masks = torch.stack(sku_masks, dim=1)
+        return sku_masks
     
 
     def get_reward(self, tc: MSPRPState):

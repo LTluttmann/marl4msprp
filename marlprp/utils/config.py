@@ -47,7 +47,7 @@ class BaseEnvParams:
     capacity: int = 20
 
     is_multi_instance: bool = field(init=False)
-    packing_ratio_penalty: float = 0.
+    packing_ratio_penalty: float = 0.1
 
     def __post_init__(self):
         if self.num_agents is None:

@@ -11,7 +11,7 @@ from typing import TypedDict, Tuple
 from marlprp.env.env import MSPRPEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.config import PolicyParams
-from marlprp.utils.ops import gather_by_index
+from marlprp.utils.ops import gather_by_index, batchify
 from marlprp.models.encoder.base import MatNetEncoderOutput
 
 from .base import BaseDecoder, BasePointer
@@ -39,21 +39,57 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         self.shelf_decoder = MultiAgentShelfDecoder(model_params)
         self.sku_decoder = MultiAgentSkuDecoder(model_params)
 
-    def forward(self, embeddings: MatNetEncoderOutput, tc: MSPRPState, env: MSPRPEnv, return_logp = False):
-        node_mask = env.get_node_mask(tc)
-        next_shelves = self.shelf_decoder(embeddings, node_mask, tc, env)
-        item_mask = env.get_item_mask_from_node(tc, next_shelves)
-        skus_to_pick = self.sku_decoder(embeddings, item_mask, tc, env)
-        action = ...
+    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MSPRPEnv, return_logp = False):
+        assert not state.is_intermediate, "State should NOT be in intermediate phase before shelf selection"
+        next_shelves, shelf_logps = self.shelf_decoder(embeddings, state, env)
 
-    def get_logp_of_action(self, embeddings, td):
-        shelf_logp, shelf_entropy, shelf_mask = self.shelf_decoder.get_logp_of_action(embeddings, td)
-        sku_logp, sku_entropy, sku_mask = self.sku_decoder.get_logp_of_action(embeddings, td)
+        # partial step through the environment to get intermediate state s'
+        intermediate_state = env.step(next_shelves, state)
+
+        assert intermediate_state.is_intermediate, "State should be in intermediate phase before SKU selection"
+        skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, env)
+
+        # step through environment to get next state
+        next_state = env.step(skus_to_pick, intermediate_state)
+        # save actions as tensordict
+        actions = TensorDict({"shelf": next_shelves, "sku": skus_to_pick}, batch_size=next_shelves.batch_size)
+        return_dict = {"state": state, "action": actions, "next": next_state}
+        if return_logp:
+            logps = TensorDict({"shelf": shelf_logps, "sku": sku_logps}, batch_size=shelf_logps.batch_size)
+            return_dict["logprobs"] = logps
+
+        return TensorDict(return_dict, batch_size=state.batch_size)
+    
+    def get_logp_of_action(self, embeddings, actions: TensorDict, state: MSPRPState):
+        state = state.clone()
+        shelf_action = actions["shelf"]
+
+        sku_action = actions["sku"]
+        shelf_logp, shelf_entropy, shelf_mask = self.shelf_decoder.get_logp_of_action(
+            embeddings, action=shelf_action, state=state
+        )
+        # update state
+        state.current_location = shelf_action["shelf"]
+        sku_logp, sku_entropy, sku_mask = self.sku_decoder.get_logp_of_action(
+            embeddings, action=sku_action, state=state
+        )
 
         action_logp = shelf_logp + sku_logp
         return action_logp
+    
+    def _set_decode_strategy(self, decode_type, **kwargs):
+        self.shelf_decoder._set_decode_strategy(decode_type, **kwargs)
+        self.sku_decoder._set_decode_strategy(decode_type, **kwargs)
 
-
+    def pre_decoding_hook(self, state, env, embeddings):
+        state, env, num_starts = self.shelf_decoder.dec_strategy.setup(state, env)
+        state, env, num_starts = self.sku_decoder.dec_strategy.setup(state, env)
+        if num_starts > 1:
+            embeddings = batchify(embeddings, num_starts)
+        return state, env, embeddings
+    
+    def _translate_actions(self, shelf, sku):
+        ...
 
 
 
@@ -68,29 +104,29 @@ class BaseMultiAgentDecoder(BaseDecoder):
     def forward(
         self, 
         embeddings: MatNetEncoderOutput, 
-        mask: torch.Tensor,
-        tc: MSPRPState,
-        env: MSPRPEnv, 
-        return_logp: bool = False
+        state: MSPRPState,
+        env: MSPRPEnv,
     ):
-        num_agents = tc.num_agents
+        num_agents = state.num_agents
         # get logits and mask
-        logits, mask = self.pointer(embeddings, tc)
-        mask = mask if mask is not None else ~tc["action_mask"]
+        logits = self.pointer(embeddings, state)
+        mask = state.action_mask.clone()
         # initialize action buffer
         actions = []
+        logps = []
         busy_agents = []
-        while not mask[...,1:].all():
+        while not mask.all():
             
             logp, step_mask = self._logits_to_logp(logits, mask)
 
-            tc = self.dec_strategy.step(logp, step_mask, tc)
+            action, logp = self.dec_strategy.step(logp, step_mask, state)
             
-            action = self._translate_action(tc, env)
+            action = self._translate_action(action, state, env)
             actions.append(action)
+            logps.append(logp)
             busy_agents.append(action["agent"])
 
-            mask = self._update_mask(mask, action, tc, busy_agents)
+            mask = self._update_mask(mask, action, state, busy_agents)
 
         # maybe pad to ensure all action buffers to have the same size
         n_active_agents = len(actions)
@@ -101,45 +137,41 @@ class BaseMultiAgentDecoder(BaseDecoder):
             pad_size = [0, 0, 0, 0]
 
         actions = torch.stack(actions, dim=1)
+        # NOTE we sort actions in ascending order of agent idx
+        agent_sort_idx = torch.argsort(actions["agent"])
+        actions = actions.gather(1, agent_sort_idx)
         actions = pad(actions, pad_size, value=0)
+        # NOTE we sort logps in ascending order of agent idx
+        logps = torch.stack(logps, dim=1)
+        logps = logps.gather(1, agent_sort_idx)
+        logps = F.pad(logps, pad_size, "constant", 0)
 
-        if return_logp:
-            logps = torch.stack(self.dec_strategy.logp["action"][-n_active_agents:], dim=1)
-            logps = F.pad(logps, pad_size, "constant", 0)
-            tc["logprobs"] = logps
+        return actions, logps
 
-        # perform env step with all agent actions
-        tc.set("action", actions)
-
-        return tc
-    
     @abc.abstractmethod
     def _logits_to_logp(self, logits, mask) -> Tuple[Tensor, Tensor]:
         pass
 
 
     @abc.abstractmethod
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, td: TensorDict, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state: MSPRPState, busy_agents: list) -> Tensor:
         pass
 
 
     @abc.abstractmethod
-    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
         pass
 
 
-    def get_logp_of_action(self,  embeddings: TensorDict, td: TensorDict):
-        bs = td.size(0)
-        # get flat action indices
-        action_indices = td["action"]["idx"]
-        pad_mask = td["action"]["pad_mask"]
+    def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, state: MSPRPState):
+        action_indices = action["idx"]
+        pad_mask = action["pad_mask"]
+        action_mask = state.action_mask
 
         # get logits and mask once
-        logits, mask = self.pointer(embeddings, td)
-        # NOTE unmask "noop" to avoid nans and infs: in principle, every agent always has the chance to wait
-        mask[..., 0] = False
+        logits = self.pointer(embeddings, state)
         # (bs, num_actions)
-        logp, _ = self._logits_to_logp(logits, mask)
+        logp, _ = self._logits_to_logp(logits, action_mask)
 
         #(bs, num_agents)
         selected_logp = gather_by_index(logp, action_indices, dim=1)
@@ -184,18 +216,19 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             
         return logp, mask
 
-    def _translate_action(self, action_idx: torch.Tensor, tc: MSPRPState) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
         # translate and store action
-        selected_agent = action_idx % tc.num_agents
-        selected_shelf = action_idx // tc.num_agents
+        selected_agent = action_idx % state.num_agents
+        selected_shelf = action_idx // state.num_agents
+
         action = TensorDict(
             {
                 "idx": action_idx, 
                 "agent": selected_agent, 
                 "shelf": selected_shelf,
-                "pad_mask": torch.full_like(action, fill_value=True, dtype=torch.bool)
+                "pad_mask": torch.full_like(action_idx, fill_value=True, dtype=torch.bool)
             },
-            batch_size=tc.batch_size
+            batch_size=state.batch_size
         )
         return action
     
@@ -203,10 +236,10 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         bs, num_mas, num_jobs_plus_one = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
-        selected_job = action["job"]
+        # selected_job = action["job"]
 
-        mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
-        mask[..., 0] = False
+        # mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
+        # mask[..., 0] = False
         mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_jobs_plus_one), True)
 
         return mask
@@ -235,18 +268,18 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
             
         return logp, mask
 
-    def _translate_action(self, action_idx: torch.Tensor, tc: MSPRPState) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
         # translate and store action
-        selected_agent = action_idx % tc.num_agents
-        selected_sku = action_idx // tc.num_agents
+        selected_agent = action_idx % state.num_agents
+        selected_sku = action_idx // state.num_agents
         action = TensorDict(
             {
                 "idx": action_idx, 
                 "agent": selected_agent, 
                 "sku": selected_sku,
-                "pad_mask": torch.full_like(action, fill_value=True, dtype=torch.bool)
+                "pad_mask": torch.full_like(action_idx, fill_value=True, dtype=torch.bool)
             },
-            batch_size=tc.batch_size
+            batch_size=state.batch_size
         )
         return action
     
@@ -254,10 +287,10 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         bs, num_mas, num_jobs_plus_one = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
-        selected_job = action["job"]
+        # selected_job = action["job"]
 
-        mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
-        mask[..., 0] = False
+        # mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
+        # mask[..., 0] = False
         mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_jobs_plus_one), True)
 
         return mask

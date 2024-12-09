@@ -104,17 +104,15 @@ class DecodingStrategy:
     ) -> Tuple[torch.Tensor, torch.Tensor, TensorDict]:
         assert not logp.isinf().all(1).any()
 
-        logp, selected_actions, td = self._step(logp, mask, td, **kwargs)
+        logp, selected_actions = self._step(logp, mask, **kwargs)
         
-        td.set(key, selected_actions)
-
         if self.only_store_selected_logp:
             logp = logp.gather(-1, selected_actions.unsqueeze(-1)).squeeze(-1)
 
         self.actions[key].append(selected_actions)
         self.logp[key].append(logp)
 
-        return td
+        return selected_actions, logp
 
     def _select_best_start(self, logp, actions, td: TensorDict, env):
         aug_batch_size = logp.size(0)  # num nodes
@@ -141,9 +139,7 @@ class Greedy(DecodingStrategy):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
-    def _step(
-        self, logp: torch.Tensor, mask: torch.Tensor, td: TensorDict, **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor, TensorDict]:
+    def _step(self, logp: torch.Tensor, mask: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         # [BS], [BS]
         selected = logp.argmax(1)
 
@@ -151,7 +147,7 @@ class Greedy(DecodingStrategy):
             1, selected.unsqueeze(1)
         ).data.any(), "infeasible action selected"
 
-        return logp, selected, td
+        return logp, selected
 
 
 class Sampling(DecodingStrategy):
@@ -160,9 +156,7 @@ class Sampling(DecodingStrategy):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
-    def _step(
-        self, logp: torch.Tensor, mask: torch.Tensor, td: TensorDict, **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor, TensorDict]:
+    def _step(self, logp: torch.Tensor, mask: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         bs, n_ops, *ma = logp.shape
         probs = logp.exp()
         assert probs.sum(1).allclose(probs.new_ones((bs, *ma)))
@@ -172,4 +166,4 @@ class Sampling(DecodingStrategy):
             log.info("Sampled bad values, resampling!")
             selected = probs.multinomial(1).view(bs, *ma)
 
-        return logp, selected, td
+        return logp, selected

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 from marlprp.env.instance import MSPRPState
@@ -76,6 +77,7 @@ class SkuKVL(nn.Module):
         super().__init__()
         self.dynamic_embedding = get_dynamic_emb(params)
         self.Wkvl = nn.Linear(params.embed_dim, 3 * params.embed_dim, bias=False)
+        self.dummy = nn.Parameter(torch.zeros(1, 1, params.embed_dim), requires_grad=False)
         self.cache = None
         
     def compute_cache(self, embs: MatNetEncoderOutput) -> None:
@@ -83,7 +85,7 @@ class SkuKVL(nn.Module):
         self.cache = self.Wkvl(embs["sku"]).chunk(3, dim=-1)
 
     def forward(self, emb: MatNetEncoderOutput, state: MSPRPState, cache = None):
-
+        bs = emb.batch_size
         glimpse_k_dyn, glimpse_v_dyn, logit_k_dyn = self.dynamic_embedding(emb, state)
 
         if cache is not None:
@@ -96,7 +98,8 @@ class SkuKVL(nn.Module):
         v_dyn = v + glimpse_v_dyn
         l_dyn = l + logit_k_dyn
 
-        return k_dyn, v_dyn, l_dyn
+        l_dyn_w_dummy_sku = torch.cat((self.dummy.expand(*bs, 1, -1), l_dyn), dim=1)
+        return k_dyn, v_dyn, l_dyn_w_dummy_sku
 
 
 class StaticEmbedding(nn.Module):

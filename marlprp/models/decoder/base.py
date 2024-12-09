@@ -2,9 +2,10 @@ import abc
 from torch import Tensor
 import torch.nn as nn
 from tensordict import TensorDict
-from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
 from marlprp.utils.ops import batchify
+from marlprp.env.instance import MSPRPState
 from marlprp.utils.config import ModelParams
+from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
 
 
 class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
@@ -13,25 +14,25 @@ class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
         self.dec_strategy: DecodingStrategy = None
         self.stepwise_encoding = model_params.stepwise_encoding
 
-    def pre_decoding_hook(self, td: TensorDict, env, embeddings: TensorDict):
-        td, env, num_starts = self.dec_strategy.setup(td, env)
+    def pre_decoding_hook(self, state: MSPRPState, env, embeddings: TensorDict):
+        state, env, num_starts = self.dec_strategy.setup(state, env)
         if num_starts > 1:
             embeddings = batchify(embeddings, num_starts)
-        return td, env, embeddings
+        return state, env, embeddings
 
-    def post_decoding_hook(self, td: TensorDict, env):
-        logps, actions, td, env = self.dec_strategy.post_decoder_hook(td, env)
-        return logps, actions, td, env
+    def post_decoding_hook(self, state: MSPRPState, env):
+        logps, actions, state, env = self.dec_strategy.post_decoder_hook(state, env)
+        return logps, actions, state, env
 
     def _set_decode_strategy(self, decode_type, **kwargs):
         self.dec_strategy = get_decoding_strategy(decode_type, **kwargs)
 
     @abc.abstractmethod
-    def forward(self, embeddings: TensorDict, td: TensorDict, env, return_logp: bool = False):
+    def forward(self, embeddings: TensorDict, state: MSPRPState, env, return_logp: bool = False):
         pass
 
     @abc.abstractmethod
-    def get_logp_of_action(self, embeddings: TensorDict, td: TensorDict):
+    def get_logp_of_action(self, embeddings, actions: TensorDict, state: MSPRPState):
         pass
 
 

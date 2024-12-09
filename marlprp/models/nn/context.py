@@ -9,19 +9,19 @@ from marlprp.models.encoder.base import MatNetEncoderOutput
 
 
 
-def get_context_emb(params: PolicyParams, extra_key: str = None):
+def get_context_emb(params: PolicyParams, key: str = None):
 
     emb_registry = {
         "maham": {
-            "shelf": ShelfDecoderContext,
-            "sku": ShelfDecoderContext
+            "shelf": AgentContext,
+            "sku": AgentContext
         }
     }
 
     EmbCls = emb_registry.get(params.policy)
 
-    if extra_key is not None:
-        EmbCls = EmbCls[extra_key]
+    if key is not None:
+        EmbCls = EmbCls[key]
 
     return EmbCls(params)
 
@@ -36,7 +36,7 @@ class Context(nn.Module):
         pass
 
 
-class ShelfDecoderContext(nn.Module):
+class AgentContext(nn.Module):
 
     def __init__(self, params: MahamParams):
         super().__init__()

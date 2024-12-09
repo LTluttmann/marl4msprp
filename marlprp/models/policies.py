@@ -67,24 +67,25 @@ class RoutingPolicy(nn.Module):
         state, env, embeddings = self.decoder.pre_decoding_hook(
             state, env, embeddings
         )
-        state = self.decoder(embeddings, state, env, return_logp=return_logp)
-        return state
+        td = self.decoder(embeddings, state, env, return_logp=return_logp)
+        return td
     
-    def evaluate(self, td, env):
-
+    def evaluate(self, td: TensorDict, env):
+        state: MSPRPState = td["state"]
+        actions: TensorDict = td["action"]
         # Encoder: get encoder output and initial embeddings from initial state
-        embeddings = self.encoder(td)
+        embeddings = self.encoder(state)
 
         # pred value via the value head
         if self.critic is not None:
-            value_pred = self.critic(embeddings, td)
+            value_pred = self.critic(embeddings, state)
         else:
             value_pred = None
         # pre decoder / actor hook
-        td, env, embeddings = self.decoder.pre_decoding_hook(
-            td, env, embeddings
+        state, env, embeddings = self.decoder.pre_decoding_hook(
+            state, env, embeddings
         )
-        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, td)
+        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, actions, state)
 
         return action_logprobs, value_pred, entropies, mask
 

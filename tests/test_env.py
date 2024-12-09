@@ -23,7 +23,7 @@ def test_env(num_agents):
     tc = env.reset(batch_size=2)
 
     while not tc.done.all():
-        node_mask = env.get_node_mask(tc)
+        node_mask = env.set_node_mask(tc)
         bs, num_agents, num_nodes = node_mask.shape
 
         # (bs, agents, shelves)
