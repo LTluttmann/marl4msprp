@@ -141,11 +141,19 @@ class MSPRPEnv:
         # We should avoid traveling to the depot back-to-back, except instance is done
         # (bs, num_agents)
         no_more_demand = state.demand.eq(0).all(1)
+        # TODO when at one depot, mask all other depots in case of no more demand...
         mask_depot = state.agent_at_depot() & ~no_more_demand[:, None]
         # (bs, num_agents, num_depots)
-        mask_depot = mask_depot[..., None].expand(-1, state.num_agents, state.num_depots)
+        mask_depot = mask_depot[..., None].repeat(1, 1, state.num_depots)
+        # for finished (i.e. no demand and back at depot) instances, mask all but current node
+        finished = state.agent_at_depot() & no_more_demand[:, None]
+        mask_depot[finished] = ~F.one_hot(
+            state.current_location[finished], 
+            num_classes=state.num_shelves + state.num_depots
+        ).bool()[...,:state.num_depots]
         # (bs, num_agents, num_nodes)
         agent_node_mask = torch.cat((mask_depot, mask_loc_per_agent), 2).bool()
+
         return agent_node_mask
 
 
