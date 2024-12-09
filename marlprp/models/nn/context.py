@@ -57,7 +57,7 @@ class AgentContext(nn.Module):
         shelf_emb = emb["shelf"]
         current_locs = state.current_location
         # get embedding of current location of agents
-        current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1)
+        current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
         # get embedding for agent state
         state_emb = self.agent_state_emb(state)
         # cat and project

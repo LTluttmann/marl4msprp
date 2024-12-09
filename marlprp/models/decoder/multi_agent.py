@@ -189,7 +189,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         logp, _ = self._logits_to_logp(logits, mask)
 
         #(bs, num_agents)
-        selected_logp = gather_by_index(logp, action_indices, dim=1)
+        selected_logp = gather_by_index(logp, action_indices, dim=1, squeeze=False)
         # get entropy
         if self.eval_multistep:
             #(bs, num_agents)

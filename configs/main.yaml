@@ -23,7 +23,7 @@ train:
     milestones: [35]
     gamma: 0.1
   optimizer_kwargs:
-    policy_lr: 5e-4
+    policy_lr: 2e-4
     weight_decay: 1e-6
   max_grad_norm: 2.0
   epochs: 30

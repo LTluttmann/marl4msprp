@@ -70,9 +70,7 @@ class AttentionPointerMechanism(nn.Module):
 
         # Batch matrix multiplication to compute logits (batch_size, num_steps, graph_size)
         # bmm is slightly faster than einsum and matmul
-        logits = (torch.bmm(glimpse, logit_key.squeeze(-2).transpose(-2, -1))).squeeze(
-            -2
-        ) / math.sqrt(glimpse.size(-1))
+        logits = torch.bmm(glimpse, logit_key.transpose(-2, -1)) / math.sqrt(glimpse.size(-1))
 
         if self.check_nan:
             assert not torch.isnan(logits).any(), "Logits contain NaNs"
