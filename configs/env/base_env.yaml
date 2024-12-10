@@ -1,4 +1,4 @@
-seed: 12345678
+env: msprp
 num_shelves: ???
 num_skus: ???
 num_storage_locations: ???

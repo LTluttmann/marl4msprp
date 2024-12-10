@@ -37,31 +37,26 @@ class MSPRPState:
             coordinates=coordinates,
             current_location=current_location,
             remaining_capacity=remaining_capacity,
-            batch_size=[batch_size],
             tour_length=tour_length,
             packing_items=packing_items,
+            batch_size=[batch_size],
+            device=supply.device
         )
     
     def __post_init__(self):
         if self.tour_length is None:
-            self.tour_length = torch.zeros((*self.batch_size, self.num_agents), dtype=torch.float32, device=self.device)
+            self.tour_length = torch.zeros(
+                (*self.batch_size, self.num_agents), 
+                dtype=torch.float32, 
+                device=self.device
+            )
+            
         if self.packing_items is None:
-            self.packing_items = torch.zeros((*self.batch_size, self.num_depots), dtype=torch.float32, device=self.device)
-    
-    # @property
-    # def is_intermediate(self):
-    #     return eval(self._is_intermediate)
-    
-    # @is_intermediate.setter
-    # def is_intermediate(self, value):
-    #     self._is_intermediate = str(value)
-
-    # @property
-    # def action_mask(self):
-    #     if self.is_intermediate:
-    #         return self.sku_mask
-    #     else:
-    #         return self.shelf_mask
+            self.packing_items = torch.zeros(
+                (*self.batch_size, self.num_depots), 
+                dtype=torch.float32, 
+                device=self.device
+            )
 
     @property
     def num_shelves(self):

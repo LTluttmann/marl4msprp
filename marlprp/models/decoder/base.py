@@ -1,8 +1,8 @@
 import abc
-from torch import Tensor
 import torch.nn as nn
 from tensordict import TensorDict
 from marlprp.utils.ops import batchify
+from marlprp.env.env import MSPRPEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.config import ModelParams
 from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
@@ -14,15 +14,16 @@ class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
         self.dec_strategy: DecodingStrategy = None
         self.stepwise_encoding = model_params.stepwise_encoding
 
-    def pre_decoding_hook(self, state: MSPRPState, env, embeddings: TensorDict):
-        state, env, num_starts = self.dec_strategy.setup(state, env)
-        if num_starts > 1:
-            embeddings = batchify(embeddings, num_starts)
-        return state, env, embeddings
+    def pre_decoding_hook(self, state: MSPRPState, embeddings: TensorDict):
+        self.dec_strategy.setup()
+        if self.dec_strategy.num_starts > 1:
+            state = batchify(state, self.dec_strategy.num_starts)
+            embeddings = batchify(embeddings, self.dec_strategy.num_starts)
+        return state, embeddings
 
-    def post_decoding_hook(self, state: MSPRPState, env):
-        logps, actions, state, env = self.dec_strategy.post_decoder_hook(state, env)
-        return logps, actions, state, env
+    def post_decoding_hook(self, state: MSPRPState, env: MSPRPEnv):
+        logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
+        return logps, actions, state
 
     def _set_decode_strategy(self, decode_type, **kwargs):
         self.dec_strategy = get_decoding_strategy(decode_type, **kwargs)

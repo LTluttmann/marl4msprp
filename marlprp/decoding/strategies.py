@@ -1,10 +1,13 @@
-from typing import Tuple, Union
-import logging
-from collections import defaultdict
 import torch
+import logging
+from typing import Tuple, Union
+from collections import defaultdict
 from tensordict.tensordict import TensorDict
-from marlprp.utils.ops import batchify
-from marlprp.utils.config import TrainingParams, TestParams
+
+from marlprp.env.env import MSPRPEnv
+from marlprp.utils.ops import unbatchify
+from marlprp.env.instance import MSPRPState
+
 from .utils import process_logits
 
 log = logging.getLogger(__name__)
@@ -53,18 +56,11 @@ class DecodingStrategy:
     def _step(self, logp: torch.Tensor, td: TensorDict, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("Must be implemented by subclass")
 
-    def setup(self, td: TensorDict, env):
+    def setup(self):
         self.actions = defaultdict(list)
         self.logp = defaultdict(list)
 
-        # Multi-start decoding: first action is chosen by ad-hoc node selection
-        if self.num_starts > 1:
-            # Expand td to batch_size * num_starts
-            td = batchify(td, self.num_starts)
-
-        return td, env, self.num_starts
-
-    def post_decoder_hook(self, td, env):
+    def post_decoder_hook(self, state: MSPRPState, env: MSPRPEnv):
 
         def stack_and_gather_logp(logp, actions):
             assert (
@@ -90,9 +86,9 @@ class DecodingStrategy:
             all_actions = torch.stack(list(map(lambda x: torch.stack(x, dim=-1), self.actions.values())), -1)
         
         if self.num_starts > 1 and self.select_best:
-            logp_selected, all_actions, td, env = self._select_best_start(logp_selected, all_actions, td, env)
+            logp_selected, all_actions, state = self._select_best_start(logp_selected, all_actions, state, env)
 
-        return logp_selected, all_actions, td, env
+        return logp_selected, all_actions, state
 
     def step(
         self, 
@@ -114,13 +110,13 @@ class DecodingStrategy:
 
         return selected_actions, logp
 
-    def _select_best_start(self, logp, actions, td: TensorDict, env):
+    def _select_best_start(self, logp, actions, state: MSPRPState, env: MSPRPEnv):
         aug_batch_size = logp.size(0)  # num nodes
         batch_size = aug_batch_size // self.num_starts
-        rewards = env.get_reward(td)
-        _, idx = torch.cat(rewards.unsqueeze(1).split(batch_size), 1).max(1)
+        rewards = env.get_reward(state)
+        _, idx = unbatchify(rewards).max(1)
         flat_idx = torch.arange(batch_size, device=rewards.device) + idx * batch_size
-        return logp[flat_idx], actions[flat_idx], td[flat_idx], env
+        return logp[flat_idx], actions[flat_idx], state[flat_idx]
     
 
     def logits_to_logp(self, logits, mask=None):

@@ -14,7 +14,7 @@ from marlprp.utils.config import PolicyParams
 from marlprp.utils.ops import gather_by_index, batchify
 from marlprp.models.encoder.base import MatNetEncoderOutput
 
-from .base import BaseDecoder, BasePointer
+from .base import BaseDecoder
 from .attn import AttentionPointer
 
 
@@ -28,7 +28,6 @@ class MultiAgentAction(TypedDict):
     agent: Tensor
     shelf: Tensor
     sku: Tensor
-
 
 
 class HierarchicalMultiAgentDecoder(BaseDecoder):
@@ -62,20 +61,23 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
             logps = TensorDict({"shelf": shelf_logps, "sku": sku_logps}, batch_size=shelf_logps.batch_size)
             return_dict["logprobs"] = logps
 
-        return TensorDict(return_dict, batch_size=state.batch_size)
+        return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
     
     def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
         state = state.clone()
+
         shelf_action = actions["shelf"]
         shelf_mask = masks["shelf"]
 
-        sku_action = actions["sku"]
-        sku_mask = masks["sku"]
         shelf_logp, shelf_entropy, shelf_loss_mask = self.shelf_decoder.get_logp_of_action(
             embeddings, action=shelf_action, mask=shelf_mask, state=state
         )
         # update state
         state.current_location = shelf_action["shelf"]
+
+        sku_action = actions["sku"]
+        sku_mask = masks["sku"]
+
         sku_logp, sku_entropy, sku_loss_mask = self.sku_decoder.get_logp_of_action(
             embeddings, action=sku_action, mask=sku_mask, state=state
         )
@@ -89,19 +91,20 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         self.shelf_decoder._set_decode_strategy(decode_type, **kwargs)
         self.sku_decoder._set_decode_strategy(decode_type, **kwargs)
 
-    def pre_decoding_hook(self, state, env, embeddings):
-        state, env, num_starts = self.shelf_decoder.dec_strategy.setup(state, env)
-        state, env, num_starts = self.sku_decoder.dec_strategy.setup(state, env)
-        if num_starts > 1:
-            embeddings = batchify(embeddings, num_starts)
-        return state, env, embeddings
+    def pre_decoding_hook(self, state, embeddings):
+        self.shelf_decoder.dec_strategy.setup()
+        self.sku_decoder.dec_strategy.setup()
+        if self.shelf_decoder.dec_strategy.num_starts > 1:
+            state = batchify(state, self.shelf_decoder.dec_strategy.num_starts)
+            embeddings = batchify(embeddings, self.shelf_decoder.dec_strategy.num_starts)
+        return state, embeddings
     
-    def post_decoding_hook(self, state, env):
-        shelf_logps, shelves, state, env = self.shelf_decoder.post_decoding_hook(state, env)
-        sku_logps, skus, state, env = self.sku_decoder.post_decoding_hook(state, env)
+    def post_decoding_hook(self, state: MSPRPState, env: MSPRPEnv):
+        shelf_logps, shelves, _ = self.shelf_decoder.post_decoding_hook(state, env)
+        sku_logps, skus, state = self.sku_decoder.post_decoding_hook(state, env)
         logps = shelf_logps + sku_logps
         actions = TensorDict({"shelf": shelves, "sku": skus}, batch_size=state.batch_size)
-        return logps, actions, state, env
+        return logps, actions, state
 
 
 
@@ -190,6 +193,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
         #(bs, num_agents)
         selected_logp = gather_by_index(logp, action_indices, dim=1, squeeze=False)
+        assert selected_logp.isfinite().all()
         # get entropy
         if self.eval_multistep:
             #(bs, num_agents)

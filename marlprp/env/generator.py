@@ -18,8 +18,8 @@ class MSPRPGenerator:
 
         super(MSPRPGenerator, self).__init__()
 
-        np.random.seed(instance_params.seed)
-        torch.manual_seed(instance_params.seed)
+        # np.random.seed(instance_params.seed)
+        # torch.manual_seed(instance_params.seed)
 
         self.num_depots = instance_params.num_depots
         self.num_skus = instance_params.num_skus
@@ -125,8 +125,8 @@ class LargeMSPRPInstanceGenerator:
 
         super(LargeMSPRPInstanceGenerator, self).__init__()
 
-        np.random.seed(instance_params.seed)
-        torch.manual_seed(instance_params.seed)
+        # np.random.seed(instance_params.seed)
+        # torch.manual_seed(instance_params.seed)
 
         self.num_depots = instance_params.num_depots
         self.num_total_skus = instance_params.num_total_skus

@@ -24,7 +24,7 @@ class MSPRPEnv:
         if td is None or td.is_empty():
             td = self.generator(batch_size=batch_size)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
-
+        
         return self._reset(td)
 
 
@@ -202,11 +202,11 @@ class MSPRPEnv:
         return sku_masks
     
 
-    def get_reward(self, tc: MSPRPState):
-        max_travel_distance_per_agent = tc.tour_length.max(1).values
+    def get_reward(self, state: MSPRPState):
+        max_travel_distance_per_agent = state.tour_length.max(1).values
 
         # calc entropy over packing station utilization
-        logp = F.log_softmax(tc.packing_items, dim=-1)
+        logp = F.log_softmax(state.packing_items, dim=-1)
         entropy = -(logp.exp() * logp).sum(1)
 
         reward = -max_travel_distance_per_agent + self.params.packing_ratio_penalty * entropy

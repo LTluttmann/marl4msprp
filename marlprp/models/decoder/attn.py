@@ -108,14 +108,9 @@ class AttentionPointer(BasePointer):
         self.num_heads = params.num_heads
         self.emb_dim = params.embed_dim
         self.stepwise_encoding = params.stepwise_encoding
-
-        self.Wq = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
         self.pointer = AttentionPointerMechanism(params, check_nan)
-
         self.context_embedding = get_context_emb(params, key=decoder_type)
         self.kvl_emb = get_kvl_emb(params, key=decoder_type)
-
-        self.cache = None
 
 
     @property
@@ -124,7 +119,7 @@ class AttentionPointer(BasePointer):
 
     def compute_cache(self, embs: MatNetEncoderOutput) -> None:
         # shape: 3 * (bs, n, emb_dim)
-        self.cache = self.kvl_emb.compute_cache(embs)
+        self.kvl_emb.compute_cache(embs)
 
     def forward(self, embs: MatNetEncoderOutput, state: MSPRPState, attn_mask: Tensor = None):
 

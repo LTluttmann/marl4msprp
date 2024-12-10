@@ -1,7 +1,9 @@
-import numpy as np
+from omegaconf import ListConfig, DictConfig
+
 import torch
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from omegaconf import ListConfig
+
 from marlprp.env.env import MSPRPEnv
 
 
@@ -63,40 +65,26 @@ class InstanceFilesDataset(Dataset):
             self, 
             env: MSPRPEnv, 
             path: str, 
-            sort_fn: callable = None
+            read_fn: callable,
         ) -> None:
 
         super().__init__()
         self.env = env
-        self.files = self.list_files(path, sort_fn)
-        self.num_samples = len(self.files)
-        self.read_kwargs = env.kwargs_from_files(self.files)
+        self.instances = read_fn(path)
+        self.num_samples = len(self.instances)
+
 
     def __len__(self):
         return self.num_samples
     
     def __getitem__(self, idx):
-        file = self.files[idx]
-        td = self.env.read_file(file, **self.read_kwargs)
+        td = self.instances[idx]
         return td
 
-    
-    @staticmethod
-    def list_files(path, sort_fn = None):
-        import os
-        files = [
-            os.path.join(path, f) 
-            for f in os.listdir(path) 
-            if os.path.isfile(os.path.join(path, f))
-        ]
-        assert len(files) > 0, f"No instance files found in path {path}"
-        if sort_fn is not None:
-            files = sorted(files, key=sort_fn)
-        return files
 
     def collate_fn(self, batch):
         td = torch.cat(batch, 0)
-        return self.env.reset(td)
+        return td
 
     
 class EnvLoader(DataLoader):
@@ -155,16 +143,26 @@ class EnvLoader(DataLoader):
 
 def get_file_dataloader(env, batch_size: int, file_dir: str = None):
     if file_dir is None:
-        return []
+        return {}
     
-    file_dirs = file_dir if isinstance(file_dir, (ListConfig, list)) else [file_dir]
+    file_read_fns = {
+        "luttmann": read_luttmann
+    }
+    
+    file_dirs = file_dir if isinstance(file_dir, (DictConfig, dict)) else {"files": file_dir}
 
-    dataloader = [
-        EnvLoader(
+    dataloader = {
+        file_name: EnvLoader(
             env=env,
             path=file_dir, 
-            batch_size=batch_size
+            batch_size=batch_size,
+            read_fn=file_read_fns[file_name]
         )
-        for file_dir in file_dirs
-    ]
+        for file_name, file_dir in file_dirs.items()
+    }
     return dataloader
+
+
+def read_luttmann(path):
+    test_data, comp_data = torch.load(path)
+    print(comp_data)

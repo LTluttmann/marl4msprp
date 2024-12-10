@@ -1,9 +1,11 @@
-import torch.nn as nn
-from dataclasses import dataclass, field
-from omegaconf import OmegaConf
 from copy import copy
+from omegaconf import OmegaConf
+from dataclasses import dataclass, field
 from typing import Literal, Dict, Type, List, Union, Optional, Any
+
+import torch.nn as nn
 from rl4co.utils import pylogger
+
 from marlprp.utils.data import infer_num_storage_locations
 
 
@@ -29,7 +31,6 @@ def save_config_to_dict(config_struct: Union[OmegaConf, Dict]):
 class BaseEnvParams:
     name: str
     id: str = None
-    seed: int = 12345678
 
     num_agents: int = None
     num_depots: Union[List, int] = 2

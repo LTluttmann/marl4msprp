@@ -17,13 +17,13 @@ def get_init_emb_layer(params: PolicyParams):
 
 
 class MultiAgentInitEmbedding(nn.Module):
-    def __init__(self, model_params: TransformerParams):
+    def __init__(self, policy_params: TransformerParams):
         super(MultiAgentInitEmbedding, self).__init__()
-        self.embed_dim = model_params.embed_dim
-
-        self.depot_proj = nn.Linear(3, model_params.embed_dim, bias=False)
-        self.shelf_proj = nn.Linear(4, model_params.embed_dim, bias=False)
-        self.sku_proj = nn.Linear(2, model_params.embed_dim, bias=False)
+        self.embed_dim = policy_params.embed_dim
+        self.capacity = policy_params.env.capacity
+        self.depot_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
+        self.shelf_proj = nn.Linear(4, policy_params.embed_dim, bias=False)
+        self.sku_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
 
     def _init_depot_embed(self, state: MSPRPState):
         depot_coordinates = state.coordinates[:, :state.num_depots]
@@ -32,7 +32,7 @@ class MultiAgentInitEmbedding(nn.Module):
         feats = torch.stack([
             depot_coordinates[..., 0],
             depot_coordinates[..., 1],
-            depot_load / (total_demand + 1e-6),
+            depot_load / total_demand
         ], dim=-1)
         return self.depot_proj(feats)
     
@@ -50,19 +50,19 @@ class MultiAgentInitEmbedding(nn.Module):
         return self.shelf_proj(feats)
 
     def _init_sku_embed(self, state: MSPRPState):
-        demand = state.demand.clone()
+        demand_scaled = state.demand.clone() / self.capacity
         num_storage_loc = state.supply.gt(0).sum(1)
 
         feats = torch.stack([
-            min_max_scale(demand),
+            demand_scaled,
             min_max_scale(num_storage_loc)
         ], dim=-1)
 
         return self.sku_proj(feats)
     
     def _init_edge_embed(self, state: MSPRPState):
-        supply = state.supply.clone()
-        return min_max_scale(supply)
+        supply_scaled = state.supply.clone() / self.capacity
+        return supply_scaled
     
     def forward(self, tc):
         depot_emb = self._init_depot_embed(tc)

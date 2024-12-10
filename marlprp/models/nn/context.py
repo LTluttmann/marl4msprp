@@ -42,8 +42,8 @@ class AgentContext(nn.Module):
         super().__init__()
         self.max_capacity = params.env.capacity
         self.proj_agent_state = nn.Linear(1, params.embed_dim, bias=False)
-        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim)
-        if params.use_communication:
+        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=False)
+        if params.use_communication and params.env.num_agents > 1:
             self.comm_layer = CommunicationLayer(params)
 
     def agent_state_emb(self, state: MSPRPState):
