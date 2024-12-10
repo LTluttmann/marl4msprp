@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - _self_
+  - base_env@env
+
+env:
+  num_shelves: 25
+  num_skus: 18
+  num_storage_locations: 50
+
