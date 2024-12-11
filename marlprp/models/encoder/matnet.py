@@ -60,10 +60,6 @@ class MatNetEncoderLayer(nn.Module):
         sku_mask=None,
     ):
 
-        # get problem sizes
-        bs, n_shelf, emb_dim = shelf_emb.shape
-        n_sku = sku_emb.size(1)
-
         #### CROSS ATTENTION ####
 
         if self.norm_first:

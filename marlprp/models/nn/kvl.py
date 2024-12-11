@@ -115,7 +115,7 @@ class StaticEmbedding(nn.Module):
         return 0, 0, 0
 
 
-class DynEmb(nn.Module):
+class ShelfDynEmb(nn.Module):
     def __init__(self, params: MahamParams) -> None:
         super().__init__()
         self.project_node_step = nn.Linear(1, 3 * params.embed_dim, bias=False)

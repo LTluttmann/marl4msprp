@@ -1,26 +1,22 @@
-import abc
 import copy
 import logging
 from omegaconf import ListConfig
-from dataclasses import dataclass
 from rich.logging import RichHandler
-from typing import Dict, Type, Any, Union, Optional, Callable
+from typing import Dict, Type, Any, Union
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.distributed as dist
-
 from lightning import LightningModule
-
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from rl4co.utils.optim_helpers import create_scheduler
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.utils import monitor_lr_changes
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
-from esel.algorithms.utils import SampleGenerator, make_replay_buffer
+from marlprp.algorithms.utils import SampleGenerator, NumericParameter, make_replay_buffer
 from marlprp.algorithms.model_args import ModelParams, ModelWithReplayBufferParams
 from marlprp.utils.config import (
     EnvParams,
@@ -36,42 +32,10 @@ model_registry: Dict[str, Type['LearningAlgorithm']] = {}
 
 # configure logging on module level, redirect to file
 log = logging.getLogger("lightning.pytorch.core")
+
 rich_handler = RichHandler(rich_tracebacks=True)
 log.addHandler(rich_handler)
 
-
-Numeric = Union[int, float]
-
-
-@dataclass
-class NumericParameter:
-    _val: Numeric
-    update_coef: Optional[float] = None
-    min: Optional[Numeric] = None
-    max: Optional[Numeric] = None
-    dtype: Type | Callable = None
-
-    def __post_init__(self):
-        self.min = self.min or float("-inf")
-        self.max = self.max or float("inf")
-
-    @property
-    def val(self):
-        if self._val is None:
-            return None
-        val = min(max(self._val, self.min), self.max)
-        if self.dtype is not None:
-            val = self.dtype(val)
-        return val
-    
-    @val.setter
-    def val(self, value):
-        self._val = value
-
-    def update(self):
-        if self.update_coef is not None:
-            self.val *= self.update_coef
-        return self
     
 
 class LearningAlgorithm(LightningModule):
@@ -248,9 +212,9 @@ class LearningAlgorithm(LightningModule):
         test_dl = self._get_dataloader(self.test_params)
         test_file_dls["synthetic"] = test_dl
 
-        keys, vals = map(lambda x: list(x), test_file_dls.items())
+        keys, values = list(test_file_dls.keys()), list(test_file_dls.values())
         self.test_set_names = keys
-        return vals
+        return values
 
     def on_train_epoch_start(self) -> None:
         self.train()
@@ -346,6 +310,7 @@ class LearningAlgorithm(LightningModule):
     def __setattr__(self, name, value):
         """Intercept attribute setting to hook parameter setup."""
         if isinstance(value, NumericParameter):
+            self.log(f"parameter/{name}", value=value.val, rank_zero_only=True)
             self.param_container[name] = value
             return super().__setattr__(name, value.val)
         super().__setattr__(name, value)
@@ -515,7 +480,7 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         super().on_train_epoch_end()
 
 
-class EvalModule(LightningModule):
+class EvalModule(LearningAlgorithm):
 
     def __init__(
         self, 
@@ -524,7 +489,7 @@ class EvalModule(LightningModule):
         test_params: TestParams
     ) -> None:
         
-        super(EvalModule, self).__init__()
+        super(LearningAlgorithm, self).__init__()
         
         self.env = env
         self.policy = policy
@@ -536,32 +501,7 @@ class EvalModule(LightningModule):
     
     def validation_step(self, batch, batch_idx):
         raise NotImplementedError("validation_step not defined for eval module")
-    
-    # PyTorch Lightning's built-in test_step method
-    def test_step(self, batch, batch_idx, dataloader_idx=0):
-        test_reward = self.policy(batch, self.env)["reward"]
-        test_set_name = self.test_set_names[dataloader_idx]
-        self.log(
-            f"test/{test_set_name}/reward", 
-            test_reward.mean(), 
-            prog_bar=True, 
-            on_step=False, 
-            on_epoch=True, 
-            add_dataloader_idx=False,
-            sync_dist=True
-        )
-
-    def test_dataloader(self):
-
-        test_loader = EnvLoader(
-            env=self.env,
-            dataset_params=self.test_params,
-            reload_every_n=1
-        )
-
-
-        return test_loader
-    
+        
     @classmethod
     def init_from_checkpoint(cls, test_params: TestParams, env_params = None, policy_cfg = None):
         assert test_params.checkpoint is not None
@@ -584,11 +524,3 @@ class EvalModule(LightningModule):
         policy.load_state_dict(policy_state_dict)   
         
         return cls(env, policy, test_params), model_params
-
-    def on_test_epoch_start(self) -> None:
-        self._setup_decoding_strategy(self.test_params)
-
-    def _setup_decoding_strategy(self, params: Union[TrainingParams, ValidationParams, TestParams]):
-        decoding_params = save_config_to_dict(params.decoding)
-        decoding_strategy = decoding_params.pop("decoding_strategy")
-        self.policy.set_decode_type(decoding_strategy, **decoding_params)

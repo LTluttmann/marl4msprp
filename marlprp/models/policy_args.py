@@ -38,5 +38,5 @@ class MatNetParams(TransformerParams):
 class MahamParams(MatNetParams):
     policy: str = "maham"
     use_communication: bool = True
-    use_rezero: bool = True
+    use_rezero: bool = False
 

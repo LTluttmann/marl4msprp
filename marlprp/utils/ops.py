@@ -1,13 +1,13 @@
-import logging
-from typing import Union
-import torch.nn as nn
 import torch
-from einops import rearrange
-from tensordict import TensorDict
+import torch.nn as nn
 from torch import Tensor
+from typing import Union
+from einops import rearrange
+from rl4co.utils import pylogger
+from tensordict import TensorDict
 
 
-log = logging.getLogger(__name__)
+log = pylogger.get_pylogger(__name__)
 
 class NormByConstant(nn.Module):
     """torch module to apply a constant norm factor on an input sequence"""

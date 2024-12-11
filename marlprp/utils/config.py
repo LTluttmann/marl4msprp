@@ -112,7 +112,6 @@ class PolicyParams:
     embed_dim: int = 256
     num_encoder_layers: int = 4
     dropout: float = 0.0
-    normalization: Literal["batch", "instance"] = "instance"
     eval_multistep: bool = True # field(init=False)
     eval_per_agent: bool = field(init=False)
     # to be specified by the learning algorithm

@@ -4,21 +4,21 @@ import time
 import json
 import logging
 import functools
+from omegaconf import OmegaConf, DictConfig
+from hydra.core.hydra_config import HydraConfig
 from typing import Any, Callable, Dict, Type, TypeVar, Union, List
 
 import torch
+from rl4co.utils import pylogger
 from lightning import LightningModule
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
-from omegaconf import OmegaConf, DictConfig
-from hydra.core.hydra_config import HydraConfig
-
 from .config import ModelParams
 
 
-# A logger for this file
-log = logging.getLogger(__name__)
+log = pylogger.get_pylogger(__name__)
+
 
 T = TypeVar('T')
 
@@ -231,7 +231,6 @@ def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig
     return WandbLogger(
         save_dir=hc.runtime.output_dir,
         tags=all_tags,
-        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}j-{env_params.num_skus}m",
+        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}s-{env_params.num_skus}i",
         **logger_cfg
     )
-

@@ -13,6 +13,7 @@ class MSPRPState:
     remaining_capacity: torch.Tensor
     tour_length: torch.Tensor = None
     packing_items: torch.Tensor = None
+    init_capacity: torch.Tensor = None
     # shelf_mask: torch.Tensor = None
     # sku_mask: torch.Tensor = None
     # _is_intermediate: str = "False"
@@ -57,6 +58,9 @@ class MSPRPState:
                 dtype=torch.float32, 
                 device=self.device
             )
+
+        if self.init_capacity is None:
+            self.init_capacity = self.remaining_capacity.clone()
 
     @property
     def num_shelves(self):

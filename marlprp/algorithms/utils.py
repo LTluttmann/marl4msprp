@@ -1,9 +1,10 @@
-import torch
-from typing import Generator, Optional
 import math
-from scipy import stats
 import torch
+from scipy import stats
+from dataclasses import dataclass
 from tensordict import TensorDict
+from typing import Generator, Optional, Callable, Union, Type
+
 from torchrl.data.replay_buffers import (
     LazyMemmapStorage,
     ListStorage,
@@ -12,6 +13,8 @@ from torchrl.data.replay_buffers import (
     TensorDictPrioritizedReplayBuffer,
     ReplayBuffer
 )
+
+Numeric = Union[int, float]
 
 
 def make_replay_buffer(
@@ -163,3 +166,35 @@ class RewardScaler:
         # newvalues - newMeant
         delta2 = batch - self.mean
         self.M2 += (delta * delta2).sum()
+
+
+
+@dataclass
+class NumericParameter:
+    _val: Numeric
+    update_coef: Optional[float] = None
+    min: Optional[Numeric] = None
+    max: Optional[Numeric] = None
+    dtype: Type | Callable = None
+
+    def __post_init__(self):
+        self.min = self.min or float("-inf")
+        self.max = self.max or float("inf")
+
+    @property
+    def val(self):
+        if self._val is None:
+            return None
+        val = min(max(self._val, self.min), self.max)
+        if self.dtype is not None:
+            val = self.dtype(val)
+        return val
+    
+    @val.setter
+    def val(self, value):
+        self._val = value
+
+    def update(self):
+        if self.update_coef is not None:
+            self.val = self._val * self.update_coef
+        return self

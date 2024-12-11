@@ -162,35 +162,39 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         # Check if we're using multiple GPUs (DDP is enabled)
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         # Only rank 0 makes the decision whether to update the reference policy
-        if self.global_rank == 0:
+        # if self.global_rank == 0:
 
-            if epoch_average > self.best_reward:
-                self.pylogger.info(
-                    f"Improved val reward {round(-self.best_reward, 2)} -> {round(-epoch_average, 2)}. " + \
-                    "Updating Reference Policy..."
-                )
-                self.best_reward = epoch_average
-                self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
-                ref_policy_changed = True
+        if epoch_average > self.best_reward:
+            self.pylogger.info(
+                f"Improved val reward {round(-self.best_reward, 2)} -> {round(-epoch_average, 2)}. " + \
+                "Updating Reference Policy..."
+            )
+            self.best_reward = epoch_average
+            self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
+            #ref_policy_changed = True
 
-            if (self.current_epoch + 1) % self.lookback_intervals == 0:
-                self.policy.load_state_dict(self.old_tgt_policy_state)
-                self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
-                tgt_policy_changed = True
+        if (self.current_epoch + 1) % self.lookback_intervals == 0:
+            self.policy.load_state_dict(self.old_tgt_policy_state)
+            self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
+            #tgt_policy_changed = True
 
-        # Synchronize the updated reference policy across all GPUs (only if DDP is enabled)
-        if world_size > 1:
-            self._sync_policies(ref_policy_changed, tgt_policy_changed)
+    #     # Synchronize the updated reference policy across all GPUs (only if DDP is enabled)
+    #     if world_size > 1:
+    #         self._sync_policies(ref_policy_changed, tgt_policy_changed)
 
-    def _sync_policies(self, ref_policy_changed, tgt_policy_changed):
-        # Synchronize the reference policy parameters across all GPUs
-        if ref_policy_changed:
-            for param in self.policy_old.parameters():
-                dist.broadcast(param.data, src=0)
-        # Synchronize the target policy parameters across all GPUs
-        if tgt_policy_changed:
-            for param in self.policy.parameters():
-                dist.broadcast(param.data, src=0)
+
+
+    # def _sync_policies(self, ref_policy_changed, tgt_policy_changed):
+    #     # Synchronize the reference policy parameters across all GPUs
+    #     if ref_policy_changed:
+    #         for param in self.policy_old.parameters():
+    #             dist.broadcast(param.data, src=0)
+    #         self.pylogger.info("...reference policy updated and synchronized.")
+    #     # Synchronize the target policy parameters across all GPUs
+    #     if tgt_policy_changed:
+    #         for param in self.policy.parameters():
+    #             dist.broadcast(param.data, src=0)
+    #         self.pylogger.info("...target policy updated and synchronized.")
 
     def on_fit_start(self) -> None:
         # make sure to set the right reward structure
@@ -213,16 +217,3 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         super().on_train_batch_end(outputs, batch, batch_idx)
         self.rb.empty()
         torch.cuda.empty_cache()
-
-        # max_bs = max(self.rollout_batch_size * self.num_starts, self.mini_batch_size)
-        # bs_in_op_block_attn = max_bs * self.env.get_problem_size(batch).num_jobs
-        # if bs_in_op_block_attn > MAX_BATCH_SIZE and hasattr(self.policy.encoder, "use_block_attn"):
-        #     self.policy.encoder.use_block_attn = False
-        #     self.policy_old.encoder.use_block_attn = False
-
-    # def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
-    #     super().on_train_batch_end(outputs, batch, batch_idx)
-    #     max_mem = torch.cuda.max_memory_allocated()
-    #     mem_available = torch.cuda.mem_get_info()
-
-

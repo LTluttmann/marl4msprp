@@ -1,12 +1,11 @@
 import torch
 import numpy as np
-import logging
+from rl4co.utils import pylogger
 from tensordict import TensorDict
 
 from marlprp.utils.config import EnvParams, LargeEnvParams
 
-
-log = logging.getLogger(__name__)
+log = pylogger.get_pylogger(__name__)
 
 
 class MSPRPGenerator:
@@ -93,6 +92,8 @@ class MSPRPGenerator:
 
         if self.num_agents is None:
             self.num_agents = torch.ceil(demand.sum(-1) / self.capacity)
+            max_num_agents = self.num_agents.max()
+            agent_pad_mask = torch.arange(1, max_num_agents+1).view(1,-1).expand(*batch_size, max_num_agents).le(max_num_agents)
 
         current_location = torch.randint(0, self.num_depots, size=(*batch_size, self.num_agents))
         capacity = torch.full((*batch_size, self.num_agents), fill_value=self.capacity, dtype=torch.float32)

@@ -1,6 +1,6 @@
 import torch
-import logging
-from typing import Tuple, Union
+from typing import Tuple
+from rl4co.utils import pylogger
 from collections import defaultdict
 from tensordict.tensordict import TensorDict
 
@@ -10,8 +10,7 @@ from marlprp.env.instance import MSPRPState
 
 from .utils import process_logits
 
-log = logging.getLogger(__name__)
-
+log = pylogger.get_pylogger(__name__)
 
 def get_decoding_strategy(decoding_strategy, **config):
     strategy_registry = {
@@ -114,7 +113,7 @@ class DecodingStrategy:
         aug_batch_size = logp.size(0)  # num nodes
         batch_size = aug_batch_size // self.num_starts
         rewards = env.get_reward(state)
-        _, idx = unbatchify(rewards).max(1)
+        _, idx = unbatchify(rewards, self.num_starts).max(1)
         flat_idx = torch.arange(batch_size, device=rewards.device) + idx * batch_size
         return logp[flat_idx], actions[flat_idx], state[flat_idx]
     

@@ -1,7 +1,8 @@
 import numpy as np
-import logging
+from rl4co.utils import pylogger
 
-log = logging.getLogger(__name__)
+
+log = pylogger.get_pylogger(__name__)
 
 
 def infer_num_storage_locations(num_skus, num_shelves, avg_loc_per_sku=None, num_storage_locations=None):

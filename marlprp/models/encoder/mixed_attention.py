@@ -10,13 +10,13 @@ def apply_weights_and_combine(
         logits: torch.Tensor, 
         v: torch.Tensor, 
         mask: torch.Tensor = None, 
-        scale: bool = True,
+        scale: bool = False,
         tanh_clipping: float = 0.
     ):
     logits = logits.clone()
     # scale to avoid numerical underflow
     if scale:
-        logits = logits / logits.std()
+        logits = logits / (logits.std() + 1e-5)
 
     # tanh clipping to avoid explosions
     if tanh_clipping > 0:
@@ -44,9 +44,15 @@ class MixedScoreFF(nn.Module):
         super().__init__()
         num_heads = params.num_heads
         ms_hidden_dim = params.ms_hidden_dim
+        # in initialization, account for the fact that we basically only have two input features
+        mix1_init = math.sqrt(1/2)
+        mix2_init = math.sqrt(1/ms_hidden_dim)
 
         self.lin1 = nn.Linear(2 * num_heads, num_heads * ms_hidden_dim, bias=False)
         self.lin2 = nn.Linear(num_heads * ms_hidden_dim, num_heads, bias=False)
+
+        nn.init.uniform_(self.lin1.weight, a=-mix1_init, b=mix1_init)
+        nn.init.uniform_(self.lin2.weight, a=-mix2_init, b=mix2_init)
 
     def forward(self, dot_product_score, cost_mat_score):
         # dot_product_score shape: (batch, head_num, row_cnt, col_cnt)
@@ -79,7 +85,9 @@ class EfficientMixedScoreMultiHeadAttention(nn.Module):
         self.Wqv1 = nn.Linear(embed_dim, 2 * embed_dim, bias=False)
         self.Wkv2 = nn.Linear(embed_dim, 2 * embed_dim, bias=False)
 
-        # self.init_parameters()
+        # nn.init.xavier_uniform_(self.Wqv1.weight)
+        # nn.init.xavier_uniform_(self.Wkv2.weight)
+
         self.mixed_scores_layer = MixedScoreFF(model_params)
 
         self.out_proj1 = nn.Linear(embed_dim, embed_dim, bias=False)

@@ -1,4 +1,4 @@
-from omegaconf import ListConfig, DictConfig
+from omegaconf import DictConfig
 
 import torch
 import numpy as np
@@ -83,7 +83,7 @@ class InstanceFilesDataset(Dataset):
 
 
     def collate_fn(self, batch):
-        td = torch.cat(batch, 0)
+        td = torch.stack(batch, 0)
         return td
 
     
@@ -164,5 +164,6 @@ def get_file_dataloader(env, batch_size: int, file_dir: str = None):
 
 
 def read_luttmann(path):
-    test_data, comp_data = torch.load(path)
-    print(comp_data)
+    td = torch.load(path)
+    return td
+    
