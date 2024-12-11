@@ -1,0 +1,3 @@
+algorithm: reinforce
+baseline: pomo
+num_starts: 100
