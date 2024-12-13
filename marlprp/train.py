@@ -1,18 +1,17 @@
 import hydra
+import logging
 import pyrootutils
 import lightning.pytorch as pl
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 from dataclasses import asdict
 from rl4co.utils.trainer import RL4COTrainer
-from rl4co.utils import (
-    instantiate_callbacks,
-    pylogger
-)
+from rl4co.utils import instantiate_callbacks
 
 from marlprp.env.env import MSPRPEnv
-from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.models.policies import RoutingPolicy
+from marlprp.utils.logger import get_lightning_logger
+from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.utils.utils import hydra_run_wrapper, get_wandb_logger
 from marlprp.utils.config import (
     EnvParams, 
@@ -25,8 +24,7 @@ from marlprp.utils.config import (
 
 
 pyrootutils.setup_root(__file__, indicator=".gitignore", pythonpath=True)
-# A logger for this file
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 
 def get_trainer(

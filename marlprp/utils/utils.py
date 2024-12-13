@@ -9,18 +9,16 @@ from hydra.core.hydra_config import HydraConfig
 from typing import Any, Callable, Dict, Type, TypeVar, Union, List
 
 import torch
-from rl4co.utils import pylogger
 from lightning import LightningModule
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
-from .config import ModelParams
-
-
-log = pylogger.get_pylogger(__name__)
+from marlprp.utils.config import ModelParams
+from marlprp.utils.logger import get_lightning_logger
 
 
 T = TypeVar('T')
+logger = get_lightning_logger(__name__)
 
 
 class Registry:
@@ -106,7 +104,7 @@ def monitor_lr_changes(func: Callable) -> Callable:
             # Check for changes and log them
             for (pre_group, pre_lr), (post_group, post_lr) in zip(pre_lrs, post_lrs):
                 if abs(pre_lr - post_lr) > 1e-12:  # Use small epsilon to handle floating point comparison
-                    log.info(
+                    logger.info(
                             f"Learning rate changed in group {pre_group} of optimizer {optimizer.__class__.__name__}: "
                             f"{pre_lr:.2e} -> {post_lr:.2e} (Δ = {post_lr - pre_lr:.2e})"
                     )
@@ -170,12 +168,12 @@ class RunManager():
 
     def __enter__(self):
         """Called before a job starts."""
-        log.info("Starting Job...")
+        logger.info("Starting Job...")
         self._enter()
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Called after a job ends."""
-        log.info("Finishing Job...")
+        logger.info("Finishing Job...")
         self._exit()
 
 
@@ -187,11 +185,11 @@ class RunManager():
                 lock_file = f"/tmp/gpu_lock_{gpu_id}"
                 if not os.path.exists(lock_file):
                     # Acquire lock
-                    log.info(f"Locking GPU with ID {gpu_id}")
+                    logger.info(f"Locking GPU with ID {gpu_id}")
                     open(lock_file, 'w').close()
                     self.locked_device = gpu_id
                     return
-            log.info(f"No GPUs available for Job No. {self.hc.job.num}. Waiting...")
+            logger.info(f"No GPUs available for Job No. {self.hc.job.num}. Waiting...")
             time.sleep(300)  # Retry if no GPU is available
 
 
@@ -199,7 +197,7 @@ class RunManager():
         """Release the GPU lock."""
         lock_file = f"/tmp/gpu_lock_{self.locked_device}"
         if os.path.exists(lock_file):
-            log.info(f"Releasing lock for GPU with ID {self.locked_device}")
+            logger.info(f"Releasing lock for GPU with ID {self.locked_device}")
             os.remove(lock_file)
 
 def hydra_run_wrapper(func):

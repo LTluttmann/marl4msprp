@@ -1,17 +1,17 @@
+import torch.nn as nn
+
 from copy import copy
 from omegaconf import OmegaConf
 from dataclasses import dataclass, field
 from typing import Literal, Dict, Type, List, Union, Optional, Any
 
-import torch.nn as nn
-from rl4co.utils import pylogger
-
+from marlprp.utils.logger import get_lightning_logger
 from marlprp.utils.data import infer_num_storage_locations
 
 
 MAX_BATCH_SIZE = 32 * 2048  # (https://github.com/facebookresearch/xformers/issues/845)
 
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 
 model_config_registry: Dict[str, Type['ModelParams']] = {}

@@ -1,9 +1,5 @@
 from dataclasses import dataclass, field
-from rl4co.utils import pylogger
-
 from marlprp.utils.config import PolicyParams
-
-log = pylogger.get_pylogger(__name__)
 
 
 @dataclass(kw_only=True)

@@ -1,17 +1,16 @@
-import torch.nn as nn
-from dataclasses import dataclass, field
-from typing import Literal, Union
-from rl4co.utils import pylogger
+from typing import Literal
+from dataclasses import dataclass
 
+from marlprp.utils.logger import get_lightning_logger
 from marlprp.utils.config import ModelParams, ModelWithReplayBufferParams, MAX_BATCH_SIZE
 
-log = pylogger.get_pylogger(__name__)
+
+log = get_lightning_logger(__name__)
 
 
 @dataclass(kw_only=True)
 class PPOParams(ModelWithReplayBufferParams):
     algorithm: str = "ppo"
-
     reward_scale: str = "scale"
     stepwise_reward: bool = True
     ref_policy_update_steps: int = 1
@@ -31,6 +30,7 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
     loss: str = "ce"
     listnet_alpha: float = 0.0
     lookback_intervals: int = None
+    always_clear_buffer: bool = False
 
     def __post_init__(self):
         super().__post_init__()

@@ -1,11 +1,8 @@
 import torch
 import numpy as np
-from rl4co.utils import pylogger
 from tensordict import TensorDict
 
 from marlprp.utils.config import EnvParams, LargeEnvParams
-
-log = pylogger.get_pylogger(__name__)
 
 
 class MSPRPGenerator:
@@ -24,13 +21,8 @@ class MSPRPGenerator:
         self.num_skus = instance_params.num_skus
         self.num_shelves = instance_params.num_shelves
         self.size_tuple = (self.num_shelves, self.num_skus)
-
         self.num_storage_locations = instance_params.num_storage_locations
-        log.info(f"Instance size is {self.num_storage_locations} physical items")
-
         self.capacity = instance_params.capacity
-        log.info(f"Picker capacity is {self.capacity}")
-
 
         # get demand params
         self.min_demand = instance_params.min_demand

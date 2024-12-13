@@ -15,6 +15,8 @@ from rl4co.utils.optim_helpers import create_scheduler
 from marlprp.env.env import MSPRPEnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.utils import monitor_lr_changes
+from marlprp.utils.ops import all_gather_w_padding
+from marlprp.utils.logger import get_lightning_logger
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
 from marlprp.algorithms.utils import SampleGenerator, NumericParameter, make_replay_buffer
 from marlprp.algorithms.model_args import ModelParams, ModelWithReplayBufferParams
@@ -30,12 +32,15 @@ from marlprp.utils.config import (
 model_registry: Dict[str, Type['LearningAlgorithm']] = {}
 
 
-# configure logging on module level, redirect to file
-log = logging.getLogger("lightning.pytorch.core")
-
-rich_handler = RichHandler(rich_tracebacks=True)
-log.addHandler(rich_handler)
-
+logger = get_lightning_logger(__name__, rzo=True)
+# rich_handler = RichHandler(
+#     # rich_tracebacks=True,
+#     omit_repeated_times=False,
+#     show_level=False,
+#     show_path=False,
+#     show_time=False,
+# )
+# logger.addHandler(rich_handler)
     
 
 class LearningAlgorithm(LightningModule):
@@ -54,9 +59,8 @@ class LearningAlgorithm(LightningModule):
         
         super(LearningAlgorithm, self).__init__()
 
-        self.pylogger = log
+        self.pylogger = logger
         self.save_hyperparameters("model_params")
-
         self.model_params = model_params
         self.train_params = train_params
         self.val_params = val_params
@@ -90,6 +94,10 @@ class LearningAlgorithm(LightningModule):
         optimizer = Adam(policy_params, **optimizer_kwargs)
         return optimizer
 
+    @property
+    def world_size(self):
+        return self.trainer.world_size
+
     @classmethod
     def initialize(
         cls,
@@ -109,6 +117,45 @@ class LearningAlgorithm(LightningModule):
             val_params,
             test_params,
         )
+
+    @classmethod
+    def init_from_checkpoint(
+        cls, 
+        env_params: EnvParams,
+        train_params: TrainingParams, 
+        val_params: ValidationParams, 
+        test_params: TestParams,
+        model_params: ModelParams = None,
+    ):
+        assert train_params.checkpoint is not None
+        ckpt = torch.load(train_params.checkpoint)
+        model_params_ckpt: ModelParams = ckpt["hyper_parameters"]["model_params"]
+        if model_params is None:
+            model_params = model_params_ckpt
+        else:
+            assert model_params.policy.policy == model_params_ckpt.policy.policy, \
+            "Policy of checkpoint and the one specified in new model parameters diverge."
+
+        env = MSPRPEnv.initialize(params=env_params, multiagent=model_params.policy.is_multiagent_policy)
+        policy = RoutingPolicy.initialize(params=model_params.policy)
+
+        Algorithm = model_registry[model_params.algorithm]
+
+        model = Algorithm.load_from_checkpoint(
+            train_params.checkpoint,
+            map_location=torch.device("cpu"),
+            env=env,
+            policy=policy,
+            model_params=model_params,
+            train_params=train_params,
+            val_params=val_params,
+            test_params=test_params,
+        )
+        
+        return model, model_params
+
+    def training_step(self, batch: Any, batch_idx: int):
+        raise NotImplementedError()
 
     # PyTorch Lightning's built-in validation_step method
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -172,9 +219,31 @@ class LearningAlgorithm(LightningModule):
             }
         }
     
-    def training_step(self, batch: Any, batch_idx: int):
-        raise NotImplementedError()
+    def __setattr__(self, name, value):
+        """Intercept attribute setting to hook parameter setup."""
+        if isinstance(value, NumericParameter):
+            self.log(f"parameter/{name}", value=value.val, rank_zero_only=True, sync_dist=True)
+            self.param_container[name] = value
+            return super().__setattr__(name, value.val)
+        super().__setattr__(name, value)
 
+    def setup_parameter(
+        self, 
+        param: Union[Any, tuple[Union[float, int], Union[float, int], float]],
+        dtype: Type = None
+    ) -> NumericParameter:
+
+        if isinstance(param, (ListConfig, list, tuple)):
+            min_val, max_val, update_coef = param
+            val = max_val if update_coef < 1 else min_val
+            return NumericParameter(val, update_coef=update_coef, min=min_val, max=max_val, dtype=dtype)
+        else:
+            return NumericParameter(param, dtype=dtype)
+
+    def _update_params(self):
+        for name, param in self.param_container.items():
+            setattr(self, name, param.update())
+    
     def _get_dataloader(self, params: Union[TrainingParams, ValidationParams, TestParams]):
 
         dataloader = EnvLoader(
@@ -206,7 +275,7 @@ class LearningAlgorithm(LightningModule):
                 self.test_params.data_dir
             )
         except FileNotFoundError as e:
-            log.warning(e.__str__())
+            self.pylogger.warning(e.__str__())
             test_file_dls = {}
 
         test_dl = self._get_dataloader(self.test_params)
@@ -216,12 +285,32 @@ class LearningAlgorithm(LightningModule):
         self.test_set_names = keys
         return values
 
+    def _setup_decoding_strategy(self, params: Union[TrainingParams, ValidationParams, TestParams]):
+        decoding_params = save_config_to_dict(params.decoding)
+        decoding_strategy = decoding_params.pop("decoding_strategy")
+        self.policy.set_decode_type(decoding_strategy, **decoding_params)
+
+    def _get_global_validation_reward(self):
+        # Stack the performance metrics on this GPU (without computing the mean yet)
+        local_val_rewards = torch.cat(self.validation_step_rewards, dim=0)
+
+        if self.world_size > 1:
+            all_val_rewards = all_gather_w_padding(local_val_rewards, self.world_size)
+            # Concatenate all the gathered performance tensors into one global tensor
+            all_val_rewards = torch.cat(all_val_rewards, dim=0)
+        else:
+            # If using a single GPU, the global performance tensor is just the local tensor
+            all_val_rewards = local_val_rewards
+
+        # Compute the average performance across all GPUs (or just this one if single GPU)
+        epoch_average = all_val_rewards.mean()
+        # Reset the list for the next validation epoch
+        self.validation_step_rewards.clear()
+        return epoch_average
+
     def on_train_epoch_start(self) -> None:
         self.train()
         self._setup_decoding_strategy(self.train_params)
-
-    def on_train_epoch_end(self) -> None:
-        return super().on_train_epoch_end()
 
     def on_validation_epoch_start(self) -> None:
         self.eval()
@@ -231,106 +320,16 @@ class LearningAlgorithm(LightningModule):
         self.eval()
         self._setup_decoding_strategy(self.test_params)
 
-    def _setup_decoding_strategy(self, params: Union[TrainingParams, ValidationParams, TestParams]):
-        decoding_params = save_config_to_dict(params.decoding)
-        decoding_strategy = decoding_params.pop("decoding_strategy")
-        self.policy.set_decode_type(decoding_strategy, **decoding_params)
-
-    def _get_global_validation_reward(self):
-        # Stack the performance metrics on this GPU (without computing the mean yet)
-        local_val_rewards = torch.cat(self.validation_step_rewards, dim=0)
-        # Reset the list for the next validation epoch
-        self.validation_step_rewards.clear()
-        # Check if we're using multiple GPUs (DDP is enabled)
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-
-        if world_size > 1:
-            # If DDP is enabled, gather the unaggregated performance tensors from all GPUs
-            all_val_rewards = [torch.zeros_like(local_val_rewards) for _ in range(world_size)]
-            # Gather all performance metrics from all GPUs (unaggregated)
-            dist.all_gather(all_val_rewards, local_val_rewards)
-            # Concatenate all the gathered performance tensors into one global tensor
-            all_val_rewards = torch.cat(all_val_rewards, dim=0)
-            # remove padded entries
-            all_val_rewards = all_val_rewards[all_val_rewards != 0]
-        else:
-            # If using a single GPU, the global performance tensor is just the local tensor
-            all_val_rewards = local_val_rewards
-
-        # Compute the average performance across all GPUs (or just this one if single GPU)
-        epoch_average = all_val_rewards.mean()
-        return epoch_average
-
-    @monitor_lr_changes
+    # @monitor_lr_changes  # NOTE potential issues with multithreading
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             return
+
         self._update_params()
         epoch_average = self._get_global_validation_reward().item()
         if hasattr(self, "reduce_on_plateau"):
             self.reduce_on_plateau.step(epoch_average)
         return epoch_average
-
-    @classmethod
-    def init_from_checkpoint(
-        cls, 
-        env_params: EnvParams,
-        train_params: TrainingParams, 
-        val_params: ValidationParams, 
-        test_params: TestParams,
-        model_params: ModelParams = None,
-    ):
-        assert train_params.checkpoint is not None
-        ckpt = torch.load(train_params.checkpoint)
-        model_params_ckpt: ModelParams = ckpt["hyper_parameters"]["model_params"]
-        if model_params is None:
-            model_params = model_params_ckpt
-        else:
-            assert model_params.policy.policy == model_params_ckpt.policy.policy, \
-            "Policy of checkpoint and the one specified in new model parameters diverge."
-
-        env = MSPRPEnv.initialize(params=env_params, multiagent=model_params.policy.is_multiagent_policy)
-        policy = RoutingPolicy.initialize(params=model_params.policy)
-
-        Algorithm = model_registry[model_params.algorithm]
-
-        model = Algorithm.load_from_checkpoint(
-            train_params.checkpoint,
-            map_location=torch.device("cpu"),
-            env=env,
-            policy=policy,
-            model_params=model_params,
-            train_params=train_params,
-            val_params=val_params,
-            test_params=test_params,
-        )
-        
-        return model, model_params
-
-    def __setattr__(self, name, value):
-        """Intercept attribute setting to hook parameter setup."""
-        if isinstance(value, NumericParameter):
-            self.log(f"parameter/{name}", value=value.val, rank_zero_only=True)
-            self.param_container[name] = value
-            return super().__setattr__(name, value.val)
-        super().__setattr__(name, value)
-
-    def setup_parameter(
-        self, 
-        param: Union[Any, tuple[Union[float, int], Union[float, int], float]],
-        dtype: Type = None
-    ) -> NumericParameter:
-
-        if isinstance(param, (ListConfig, list, tuple)):
-            min_val, max_val, update_coef = param
-            val = max_val if update_coef < 1 else min_val
-            return NumericParameter(val, update_coef=update_coef, min=min_val, max=max_val, dtype=dtype)
-        else:
-            return NumericParameter(param, dtype=dtype)
-
-    def _update_params(self):
-        for name, param in self.param_container.items():
-            setattr(self, name, param.update())
 
 
 class ManualOptLearningAlgorithm(LearningAlgorithm):
@@ -355,14 +354,15 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
 
         self.automatic_optimization = False
 
-    @monitor_lr_changes
-    def on_train_epoch_end(self):
-        super().on_train_epoch_end()
+    # @monitor_lr_changes
+    def on_validation_epoch_end(self):
+        epoch_average = super().on_validation_epoch_end()
         # update learning rate schedulers
         scheduler = self.lr_schedulers()
         scheduler.step()
+        return epoch_average
 
-    def manual_opt_step(self, loss, batch_idx: int) -> None:
+    def manual_opt_step(self, loss) -> None:
         opt = self.optimizers()
         # opt.zero_grad()
         self.manual_backward(loss)
@@ -372,10 +372,8 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
                 gradient_clip_val=self.train_params.max_grad_norm,
                 gradient_clip_algorithm="norm",
             )
-
-        if (batch_idx + 1) % self.train_params.accumulate_grad_batches == 0:
-            opt.step()
-            opt.zero_grad()
+        opt.step()
+        opt.zero_grad()
 
 
 
@@ -442,7 +440,6 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             self._num_batches = None
             self.inner_epochs = self.setup_parameter(self.model_params.inner_epochs, dtype=int)
 
-
     def setup_experience_sampler(self):
         self.experience_sampler = SampleGenerator(
             rb=self.rb, 
@@ -476,8 +473,6 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def rollout_batch_size(self, value):
         self._rollout_batch_size = value
 
-    def on_train_epoch_end(self):
-        super().on_train_epoch_end()
 
 
 class EvalModule(LearningAlgorithm):

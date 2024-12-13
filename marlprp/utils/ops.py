@@ -3,11 +3,12 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Union
 from einops import rearrange
-from rl4co.utils import pylogger
+import torch.distributed as dist
 from tensordict import TensorDict
+from marlprp.utils.logger import get_lightning_logger
 
 
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 class NormByConstant(nn.Module):
     """torch module to apply a constant norm factor on an input sequence"""
@@ -137,3 +138,35 @@ def sample_n_random_actions(td: TensorDict, n: int):
     selected = torch.multinomial(ps, n, replacement=replace).squeeze(1)
     selected = rearrange(selected, "b n -> (n b)")
     return selected.to(td.device)
+
+
+def all_gather_w_padding(q: torch.Tensor, ws: int):
+    """
+    Gathers tensor arrays of different lengths across multiple gpus
+    
+    Parameters
+    ----------
+        q : tensor array
+        ws : world size
+        
+    Returns
+    -------
+        all_q : list of gathered tensor arrays from all the gpus
+
+    """
+    local_size = torch.tensor(q.size(), device=q.device)
+    all_sizes = [torch.zeros_like(local_size) for _ in range(ws)]
+    dist.all_gather(all_sizes, local_size)
+    max_size = max(all_sizes)
+
+    size_diff = max_size.item() - local_size.item()
+    if size_diff:
+        padding = torch.zeros(size_diff, device=q.device, dtype=q.dtype)
+        q = torch.cat((q, padding))
+
+    all_qs_padded = [torch.zeros_like(q) for _ in range(ws)]
+    dist.all_gather(all_qs_padded, q)
+    all_qs = []
+    for q, size in zip(all_qs_padded, all_sizes):
+        all_qs.append(q[:size])
+    return all_qs

@@ -42,7 +42,6 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         if self.model_params.lookback_intervals:
             self.old_tgt_policy_state = copy.deepcopy(self.policy.state_dict())
 
-
         self.num_starts = self.setup_parameter(model_params.num_starts, dtype=int)
         self.entropy_coef = self.setup_parameter(model_params.entropy_coef)
         self.lookback_intervals = self.setup_parameter(
@@ -56,11 +55,12 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         else:
             self.loss_fn = partial(listnet_loss, alpha=model_params.listnet_alpha)
 
-    def _update(self, device, batch_idx: int):
+    def _update(self):
         losses = []
+
         for sub_td in self.experience_sampler:
 
-            sub_td = sub_td.to(device)
+            sub_td = sub_td.to(self.device)
             weight = sub_td.get("_weight", None)
 
             logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
@@ -82,16 +82,16 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             else:
                 loss = loss.mean()
 
-            self.manual_opt_step(loss, batch_idx)
+            self.manual_opt_step(loss)
             losses.append(loss.detach())
 
-        return torch.stack(losses, dim=0).mean()
+        loss = torch.stack(losses, dim=0).mean()
+        self.log("train/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def training_step(self, batch: TensorDict, batch_idx: int):
         
         orig_state = self.env.reset(batch)
         bs = orig_state.size(0)
-        device = orig_state.device
         train_rewards = []
         # data gathering loop
         for i in range(0, bs, self.rollout_batch_size):
@@ -147,58 +147,37 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.rb.extend(best_states)
 
         train_reward = torch.stack(train_rewards).mean()
-        loss = self._update(device, batch_idx)        
         self.log("train/reward", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        if self.trainer.is_last_batch:
+            self._update()
+
+        loss = torch.tensor(0.0, device=self.device)  # dummy loss
         return {"loss": loss, "reward": train_reward}
 
     def on_validation_epoch_end(self):
         if self.trainer.sanity_checking:
             return
         
-        tgt_policy_changed = False
-        ref_policy_changed = False
+        improved = False
         epoch_average = super().on_validation_epoch_end()
-        # Check if we're using multiple GPUs (DDP is enabled)
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        # Only rank 0 makes the decision whether to update the reference policy
-        # if self.global_rank == 0:
-
         if epoch_average > self.best_reward:
             self.pylogger.info(
                 f"Improved val reward {round(-self.best_reward, 2)} -> {round(-epoch_average, 2)}. " + \
                 "Updating Reference Policy..."
             )
+            improved = True
             self.best_reward = epoch_average
             self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
-            #ref_policy_changed = True
+
+        if self.model_params.always_clear_buffer or improved:
+            self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
+            self.rb.empty()
+            torch.cuda.empty_cache()
 
         if (self.current_epoch + 1) % self.lookback_intervals == 0:
             self.policy.load_state_dict(self.old_tgt_policy_state)
             self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
-            #tgt_policy_changed = True
-
-    #     # Synchronize the updated reference policy across all GPUs (only if DDP is enabled)
-    #     if world_size > 1:
-    #         self._sync_policies(ref_policy_changed, tgt_policy_changed)
-
-
-
-    # def _sync_policies(self, ref_policy_changed, tgt_policy_changed):
-    #     # Synchronize the reference policy parameters across all GPUs
-    #     if ref_policy_changed:
-    #         for param in self.policy_old.parameters():
-    #             dist.broadcast(param.data, src=0)
-    #         self.pylogger.info("...reference policy updated and synchronized.")
-    #     # Synchronize the target policy parameters across all GPUs
-    #     if tgt_policy_changed:
-    #         for param in self.policy.parameters():
-    #             dist.broadcast(param.data, src=0)
-    #         self.pylogger.info("...target policy updated and synchronized.")
-
-    def on_fit_start(self) -> None:
-        # make sure to set the right reward structure
-        self.env.stepwise_reward = False
 
     def state_dict(self, *args, **kwargs):
         # Get the original state_dict
@@ -212,8 +191,6 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         self.best_reward = state_dict.pop("best_reward", self.best_reward)
         # Load the remaining state_dict
         super().load_state_dict(state_dict, *args, **kwargs)
-
-    def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
-        super().on_train_batch_end(outputs, batch, batch_idx)
-        self.rb.empty()
-        torch.cuda.empty_cache()
+    def on_fit_start(self):
+        if self.world_size > 1:
+            raise ValueError("Cant us self labeling with multiple gpus yet. Need to implement a strategy for handling the replay buffer among multiple devices")

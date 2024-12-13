@@ -1,12 +1,12 @@
 import copy
 import torch
 import torch.nn as nn
-from rl4co.utils import pylogger
 
-from marlprp.algorithms.model_args import ReinforceParams
 from marlprp.utils.ops import unbatchify
+from marlprp.utils.logger import get_lightning_logger
+from marlprp.algorithms.model_args import ReinforceParams
 
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 
 class Baseline(object):

@@ -1,13 +1,13 @@
 import copy
 import lightning.pytorch as pl
-from rl4co.utils import pylogger
 from lightning.pytorch.callbacks import Callback
+from marlprp.utils.logger import get_lightning_logger
+from marlprp.algorithms.base import LearningAlgorithm
 from lightning.pytorch.callbacks import BatchSizeFinder
-from esel.algorithms.base import LearningAlgorithm
+
 
 # A logger for this file
-
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 
 class RolloutBatchSizeFinder(BatchSizeFinder):

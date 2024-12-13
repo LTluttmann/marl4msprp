@@ -1,16 +1,16 @@
 import torch
 from typing import Tuple
-from rl4co.utils import pylogger
 from collections import defaultdict
 from tensordict.tensordict import TensorDict
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.utils.ops import unbatchify
 from marlprp.env.instance import MSPRPState
+from marlprp.utils.logger import get_lightning_logger
 
 from .utils import process_logits
 
-log = pylogger.get_pylogger(__name__)
+log = get_lightning_logger(__name__)
 
 def get_decoding_strategy(decoding_strategy, **config):
     strategy_registry = {

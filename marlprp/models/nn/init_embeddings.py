@@ -21,7 +21,7 @@ class MultiAgentInitEmbedding(nn.Module):
         self.embed_dim = policy_params.embed_dim
         self.capacity = None
         self.depot_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
-        self.shelf_proj = nn.Linear(4, policy_params.embed_dim, bias=False)
+        self.shelf_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
         self.sku_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
 
     def _init_depot_embed(self, state: MSPRPState):
@@ -30,7 +30,7 @@ class MultiAgentInitEmbedding(nn.Module):
         feats = torch.stack([
             depot_coordinates[..., 0],
             depot_coordinates[..., 1],
-            depot_load / self.capacity
+            min_max_scale(depot_load, dim=1)
         ], dim=-1)
         return self.depot_proj(feats)
     
@@ -44,7 +44,7 @@ class MultiAgentInitEmbedding(nn.Module):
             shelf_coordinates[..., 0],
             shelf_coordinates[..., 1],
             num_stored_skus / num_skus,
-            mean_supply / self.capacity,
+            # mean_supply / self.capacity,
         ], dim=-1)
         return self.shelf_proj(feats)
 
