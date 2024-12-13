@@ -33,14 +33,14 @@ model_registry: Dict[str, Type['LearningAlgorithm']] = {}
 
 
 logger = get_lightning_logger(__name__, rzo=True)
-# rich_handler = RichHandler(
-#     # rich_tracebacks=True,
-#     omit_repeated_times=False,
-#     show_level=False,
-#     show_path=False,
-#     show_time=False,
-# )
-# logger.addHandler(rich_handler)
+rich_handler = RichHandler(
+    # rich_tracebacks=True,
+    omit_repeated_times=False,
+    show_level=False,
+    show_path=False,
+    show_time=False,
+)
+logger.addHandler(rich_handler)
     
 
 class LearningAlgorithm(LightningModule):

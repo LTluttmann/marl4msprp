@@ -147,7 +147,6 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.rb.extend(best_states)
             self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
 
-
         train_reward = torch.stack(train_rewards).mean()
         self.log("train/reward", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
 
