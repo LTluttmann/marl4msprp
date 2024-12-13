@@ -396,7 +396,7 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             val_params=val_params,
             test_params=test_params
         )
-
+        torch.manual_seed(1234567)
         self.model_params: ModelWithReplayBufferParams
 
         # setup reference policy

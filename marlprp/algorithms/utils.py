@@ -28,7 +28,7 @@ def make_replay_buffer(
     
     if device == "cpu":
         storage = LazyMemmapStorage(buffer_size, device="cpu")
-        prefetch = 3
+        prefetch = 10
     else:
         storage = ListStorage(buffer_size)
         prefetch = None
@@ -38,7 +38,7 @@ def make_replay_buffer(
             storage=storage,
             batch_size=batch_size,
             sampler=SamplerWithoutReplacement(drop_last=False),
-            pin_memory=False,
+            pin_memory=device!="cpu",
             prefetch=prefetch,
         )
 
@@ -49,7 +49,7 @@ def make_replay_buffer(
             storage=storage,
             batch_size=batch_size,
             priority_key=priority_key,
-            pin_memory=False,
+            pin_memory=device!="cpu",
             prefetch=prefetch,
         )
 

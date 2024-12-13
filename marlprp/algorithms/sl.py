@@ -145,15 +145,17 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             best_states = best_states[~best_states["state"].done]
             # save to memory
             self.rb.extend(best_states)
+            self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
+
 
         train_reward = torch.stack(train_rewards).mean()
         self.log("train/reward", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        if self.trainer.is_last_batch:
+        if self.trainer.is_last_batch or self.model_params.update_after_every_batch:
             self._update()
 
-        loss = torch.tensor(0.0, device=self.device)  # dummy loss
-        return {"loss": loss, "reward": train_reward}
+        dummy_loss = torch.tensor(0.0, device=self.device)  # dummy loss
+        return {"loss": dummy_loss, "reward": train_reward}
 
     def on_validation_epoch_end(self):
         if self.trainer.sanity_checking:
@@ -191,6 +193,14 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         self.best_reward = state_dict.pop("best_reward", self.best_reward)
         # Load the remaining state_dict
         super().load_state_dict(state_dict, *args, **kwargs)
+
     def on_fit_start(self):
         if self.world_size > 1:
             raise ValueError("Cant us self labeling with multiple gpus yet. Need to implement a strategy for handling the replay buffer among multiple devices")
+        
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        super().on_train_batch_end(outputs, batch, batch_idx)
+        if self.model_params.update_after_every_batch:
+            self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
+            self.rb.empty()
+            torch.cuda.empty_cache()

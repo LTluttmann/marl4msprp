@@ -31,6 +31,7 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
     listnet_alpha: float = 0.0
     lookback_intervals: int = None
     always_clear_buffer: bool = False
+    update_after_every_batch: bool = False
 
     def __post_init__(self):
         super().__post_init__()
