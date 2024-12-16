@@ -19,7 +19,6 @@ Numeric = Union[int, float]
 
 def make_replay_buffer(
         buffer_size: int, 
-        batch_size: int, 
         device="cpu", 
         priority_key: str = None,
         priority_alpha: float = 0.2,
@@ -28,7 +27,7 @@ def make_replay_buffer(
     
     if device == "cpu":
         storage = LazyMemmapStorage(buffer_size, device="cpu")
-        prefetch = 10
+        prefetch = 5
     else:
         storage = ListStorage(buffer_size)
         prefetch = None
@@ -36,9 +35,9 @@ def make_replay_buffer(
     if priority_key is None:
         rb = TensorDictReplayBuffer(
             storage=storage,
-            batch_size=batch_size,
-            sampler=SamplerWithoutReplacement(drop_last=False),
-            pin_memory=device!="cpu",
+            # batch_size=batch_size,
+            # sampler=SamplerWithoutReplacement(drop_last=True, shuffle=True),
+            pin_memory=False,  # TODO use pin_memory https://pytorch.org/docs/stable/notes/cuda.html#use-pinned-memory-buffers
             prefetch=prefetch,
         )
 
@@ -47,51 +46,13 @@ def make_replay_buffer(
             alpha=priority_alpha, # how much to use prioritization
             beta=priority_beta, # how much to correct for bias through importance sampling
             storage=storage,
-            batch_size=batch_size,
+            #batch_size=batch_size,
             priority_key=priority_key,
-            pin_memory=device!="cpu",
+            pin_memory=False,
             prefetch=prefetch,
         )
 
     return rb
-
-
-class SampleGenerator:
-    def __init__(self, rb: ReplayBuffer, num_iter: Optional[int] = None, num_samples: Optional[int] = None):
-        self.rb = rb
-        self.num_iter = num_iter
-        self.num_samples = num_samples
-
-    def __iter__(self) -> Generator[TensorDict, None, None]:
-        # Case 1: No number of samples is given, return a dataset-like iterator over the replay buffer
-        if self.num_samples is None:
-            if isinstance(self.rb, TensorDictPrioritizedReplayBuffer):
-                raise ValueError("Can't use priorities in dataset mode")
-            num_iter = self.num_iter or 1
-            for _ in range(num_iter):
-                for item in self.rb:
-                    yield item
-
-        # Case 2: Number of samples is given, use the sampler to return n samples
-        else:
-            for _ in range(self.num_samples):
-                yield self.rb.sample()
-
-
-
-def samples(rb: ReplayBuffer, num_iter: int = None, num_samples: int = None) -> Generator[TensorDict, None, None]:
-    # Case 1: No number of samples is given, return a dataset like iterator over the replay buffer
-    if num_samples is None:
-        assert not isinstance(rb, TensorDictPrioritizedReplayBuffer), "cant use priorities in dataset mode"
-        num_iter = num_iter or 1
-        for _ in range(num_iter):
-            for item in rb:
-                yield item
-    
-    # Case 2: Number of samples is given, use the sampler to return n samples
-    else:
-        for _ in range(num_samples):
-            yield rb.sample()
 
 
 def one_sided_independent_t_test(candidate_rewards, ref_rewards):

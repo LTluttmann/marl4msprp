@@ -73,14 +73,12 @@ class InstanceFilesDataset(Dataset):
         self.instances = read_fn(path)
         self.num_samples = len(self.instances)
 
-
     def __len__(self):
         return self.num_samples
     
     def __getitem__(self, idx):
         td = self.instances[idx]
         return td
-
 
     def collate_fn(self, batch):
         td = torch.stack(batch, 0)
@@ -165,5 +163,10 @@ def get_file_dataloader(env, batch_size: int, file_dir: str = None):
 
 def read_luttmann(path):
     td = torch.load(path)
+    # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)
+    # num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["remaining_capacity"])
+    # max_num_agents = int(num_agents.max().item())
+    # agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*td.batch_size, max_num_agents)
+    # td.set("agent_pad_mask", agent_pad_mask)
     return td
     

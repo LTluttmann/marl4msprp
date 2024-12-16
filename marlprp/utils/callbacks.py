@@ -86,3 +86,44 @@ class ValidationScheduler(Callback):
                 pl_module.policy.load_state_dict(self.policy_state_dict)
             trainer.val_check_batch = self.val_check_batch
             self._restored = True
+
+
+class LearningRateWarmupCallback(pl.Callback):
+    def __init__(self, warmup_steps: int, initial_lr: float = 1e-7):
+        """
+        Callback to warm up the learning rate linearly over a specified number of steps.
+
+        Args:
+            warmup_steps (int): Number of warmup steps.
+            initial_lr (float): Initial learning rate for the warmup.
+        """
+        super().__init__()
+        self.warmup_steps = warmup_steps
+        self.initial_lr = initial_lr
+        self.backward_count = 0
+
+    def on_train_start(self, trainer, pl_module):
+        """
+        Save the initial learning rate from the optimizer.
+        """
+        self.target_lrs = [group['lr'] for group in trainer.optimizers[0].param_groups]
+        for group in trainer.optimizers[0].param_groups:
+            group['lr'] = self.initial_lr
+
+    def on_after_backward(self, trainer, pl_module):
+        """
+        Adjust the learning rate linearly after each backward pass.
+        """
+        self.backward_count += 1
+
+        if self.backward_count < self.warmup_steps:
+            warmup_factor = self.backward_count / self.warmup_steps
+            new_lrs = [self.initial_lr + (target_lr - self.initial_lr) * warmup_factor
+                       for target_lr in self.target_lrs]
+
+            for param_group, lr in zip(trainer.optimizers[0].param_groups, new_lrs):
+                param_group['lr'] = lr
+        elif self.backward_count == self.warmup_steps:
+            # Ensure the learning rate is set to the target value after warmup
+            for param_group, target_lr in zip(trainer.optimizers[0].param_groups, self.target_lrs):
+                param_group['lr'] = target_lr

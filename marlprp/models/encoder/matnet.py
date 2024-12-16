@@ -120,7 +120,7 @@ class MatNetEncoder(BaseEncoder):
 
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
-            cross_mask = state.supply.gt(0)
+            cross_mask = state.supply.gt(0).clone()
         else:
             cross_mask = None
 

@@ -1,10 +1,10 @@
 # @package _global_
 model:
   algorithm: sl
-  inner_epochs: 5
-    # - 3
-    # - 10
-    # - 1.05
+  inner_epochs: #  5
+    - 3
+    - 10
+    - 1.05
   rollout_batch_size: 100
   mini_batch_size: 2000
   num_starts: 100
@@ -13,12 +13,17 @@ model:
   loss: ce
   listnet_alpha: 0.0
   lookback_intervals: 0
-  always_clear_buffer: false
+  always_clear_buffer: true
   update_after_every_batch: false
 
 
-# callbacks:
+callbacks:
 
+  lr_warmup_callback:
+    _target_: marlprp.utils.callbacks.LearningRateWarmupCallback
+    warmup_steps: 10
+    initial_lr: 1e-7
+    
   # validation_scheduler:
   #   _target_: marlprp.utils.callbacks.ValidationScheduler
   #   warmup_epochs_n: 1

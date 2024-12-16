@@ -23,7 +23,7 @@ class NormByConstant(nn.Module):
 
 
 def min_max_scale(tensor: torch.Tensor, dim=None):
-    tensor = tensor.to(torch.float32)
+    tensor = tensor.clone().to(torch.float32)
     if dim is not None:
         tensor -= tensor.min(dim, keepdim=True)[0]
         tensor /= (tensor.max(dim, keepdim=True)[0] + 1e-6)
@@ -138,6 +138,13 @@ def sample_n_random_actions(td: TensorDict, n: int):
     selected = torch.multinomial(ps, n, replacement=replace).squeeze(1)
     selected = rearrange(selected, "b n -> (n b)")
     return selected.to(td.device)
+
+
+def all_gather_numeric(num: Union[int, float], ws: int, device):
+    local_num = torch.tensor(num, device=device)
+    all_num = [torch.zeros_like(local_num) for _ in range(ws)]
+    dist.all_gather(all_num, local_num)
+    return all_num
 
 
 def all_gather_w_padding(q: torch.Tensor, ws: int):

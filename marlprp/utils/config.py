@@ -33,7 +33,7 @@ class BaseEnvParams:
     id: str = None
 
     num_agents: int = None
-    num_depots: Union[List, int] = 2
+    num_depots: Union[List, int] = 1
     num_shelves: Union[List, int] = 10
     
     avg_loc_per_sku: int = None
@@ -48,16 +48,24 @@ class BaseEnvParams:
     capacity: int = 20
 
     is_multi_instance: bool = field(init=False)
+    
     packing_ratio_penalty: float = 0.1
+    zero_picks_penalty: float = 0.05
+
+    always_mask_depot: bool = False
+
 
     def __post_init__(self):
-        if self.num_agents is None:
-            raise NotImplementedError(
-                "Num agents must be the same over all batch instances. Otherwise, padding would be necessary, which is not implemented yet."
-            )
+
         if self.max_supply is not None and self.avg_supply_to_demand_ratio is not None:
             log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
             self.max_supply = None
+
+        if self.num_agents is None:
+            # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
+            # (i.e. everything has been collected)
+            self.always_mask_depot = True
+
 
 
     def __init_subclass__(cls, *args, **kw):
@@ -203,12 +211,11 @@ class ModelParams:
 
 @dataclass(kw_only=True)
 class ModelWithReplayBufferParams(ModelParams):
-    inner_epochs: int = 1
-    num_batches: int = None
+    inner_epochs: int = None
     mini_batch_size: int = None
     rollout_batch_size: int = None
     buffer_storage_device: Literal["gpu", "cpu"] = "gpu"
-    buffer_size: int = 100_000
+    buffer_size: int = 1_000_000
     # replay buffers allow us to gather experience in evaluation mode
     # Thus, memory leakage through growing gradient information is avoided
     stepwise_encoding: bool = True 

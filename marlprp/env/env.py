@@ -3,16 +3,17 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
-from marlprp.env.generator import MSPRPGenerator
+
 from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
-
+from marlprp.utils.ops import gather_by_index
+from marlprp.env.generator import MSPRPGenerator
 
 class MSPRPEnv:
 
     name = "msprp"
 
-    def __init__(self, params: EnvParams) -> None:
+    def __init__(self, params: EnvParams = None) -> None:
         self.generator = MSPRPGenerator(params)
         self.params = params
 
@@ -24,16 +25,14 @@ class MSPRPEnv:
         if td is None or td.is_empty():
             td = self.generator(batch_size=batch_size)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
-        
         return self._reset(td)
 
 
     def _reset(self, td: TensorDict) -> MSPRPState:
+
         state = MSPRPState.initialize(
-            num_depots=self.params.num_depots,
-            **td,
+            **td.clone(),
         )
-        # state.shelf_mask = self.get_node_mask(state)
         return state
 
 
@@ -75,13 +74,13 @@ class MSPRPEnv:
         state.current_location[batch_idx, current_agent] = next_node
 
         # if agent returns to packing station, record how many items need to be packed at packing station
-        at_depot = next_node.lt(self.params.num_depots)
+        at_depot = next_node.lt(state.num_depots)
         depot_id = next_node[at_depot]
         depot_agent = current_agent[at_depot]
-        load = self.params.capacity - state.remaining_capacity.gather(1, current_agent[:, None]).squeeze(1)
+        load = state.capacity - gather_by_index(state.remaining_capacity, current_agent, dim=1)
         state.packing_items[at_depot, depot_id] += load[at_depot]
         # reset remaining load when at depot
-        state.remaining_capacity[at_depot, depot_agent] = self.params.capacity
+        state.remaining_capacity[at_depot, depot_agent] = state.capacity
         # after shelf selection the state is in an intermediate phase
         # state.is_intermediate = True
         return state
@@ -93,35 +92,28 @@ class MSPRPEnv:
         # Update the dynamic elements differently for if we visit depot vs. a city
         # NOTE: Need to use the curr_node property instead of the shelves determined by the actor, since
         # during beam search different shelves might occur as beam parents for the sku child nodes
-        bs = chosen_sku.size(0)
-        batch_idx = torch.arange(0, bs, dtype=torch.long, device=state.device)
-        chosen_shelf = state.current_location.gather(1, curr_agent[:, None]).squeeze(1)
+        pick_instance = chosen_sku != 0
 
-        depot = state.agent_at_depot(curr_agent)
-        visit = ~depot
         # subtract 1 for dummy item
-        chosen_sku = chosen_sku[visit] - 1
-        agent = curr_agent[visit]
-        remaining_capacity = state.remaining_capacity[visit, agent]
-        #state = state.masked_select(visit)
+        chosen_sku = chosen_sku[pick_instance] - 1
+        agent = curr_agent[pick_instance]
+        remaining_capacity = state.remaining_capacity[pick_instance, agent]
 
         # [BS, 1]
-        shelf_idx = chosen_shelf[visit] - state.num_depots
+        chosen_shelf = state.current_location.gather(1, curr_agent[:, None]).squeeze(1)
+        shelf_idx = chosen_shelf[pick_instance] - state.num_depots
 
         # [num_visited]
-        demand_of_sku = state.demand[visit, chosen_sku]
-        supply_at_shelf = state.supply[visit, shelf_idx, chosen_sku]
+        demand_of_sku = state.demand[pick_instance, chosen_sku]
+        supply_at_shelf = state.supply[pick_instance, shelf_idx, chosen_sku]
 
         taken_units = torch.min(demand_of_sku, supply_at_shelf)
         taken_units = torch.min(taken_units, remaining_capacity)
+        state.zero_units_taken[pick_instance] += taken_units.eq(0).int()
 
-        state.supply[visit, shelf_idx, chosen_sku] -= taken_units
-        state.remaining_capacity[visit, agent] -= taken_units   
-        state.demand[visit, chosen_sku] -= taken_units
-        # full transition completed from sku selection
-        # state.is_intermediate = False
-        # reset remaining load when at depot
-        # state.remaining_capacity[depot, curr_agent[depot]] = self.params.capacity
+        state.supply[pick_instance, shelf_idx, chosen_sku] -= taken_units
+        state.remaining_capacity[pick_instance, agent] -= taken_units   
+        state.demand[pick_instance, chosen_sku] -= taken_units
 
         return state
 
@@ -132,28 +124,32 @@ class MSPRPEnv:
         Forbids to visit depot twice in a row, unless all nodes have been visited
         :return:
         """
-
         # (bs, num_agents)
         has_no_capacity = state.remaining_capacity.eq(0)
         # (bs, num_shelves)
-        mask_loc = (state.demand[:, None, :].lt(1e-5) |  state.supply.lt(1e-5)).all(-1)
+        mask_loc = (state.demand[:, None, :].lt(1e-6) |  state.supply.lt(1e-6)).all(-1)
+        # (bs, num_agents, num_shelves)
         mask_loc_per_agent = has_no_capacity[..., None] | mask_loc[:, None]
-        # We should avoid traveling to the depot back-to-back, except instance is done
-        # (bs, num_agents)
         no_more_demand = state.demand.eq(0).all(1)
-        # TODO when at one depot, mask all other depots in case of no more demand...
-        mask_depot = state.agent_at_depot() & ~no_more_demand[:, None]
-        # (bs, num_agents, num_depots)
-        mask_depot = mask_depot[..., None].repeat(1, 1, state.num_depots)
+        if self.params.always_mask_depot:
+            mask_depot = ~mask_loc_per_agent.all(-1, keepdims=True).repeat(1, 1, state.num_depots)
+        else:
+            # We should avoid traveling to the depot back-to-back, except instance is done
+            # (bs, num_agents)
+            mask_depot = state.agent_at_depot() & ~no_more_demand[:, None]
+            # (bs, num_agents, num_depots)
+            mask_depot = mask_depot[..., None].repeat(1, 1, state.num_depots)
         # for finished (i.e. no demand and back at depot) instances, mask all but current node
         finished = state.agent_at_depot() & no_more_demand[:, None]
-        mask_depot[finished] = ~F.one_hot(
-            state.current_location[finished], 
-            num_classes=state.num_shelves + state.num_depots
-        ).bool()[...,:state.num_depots]
+        mask_depot[finished] = ~(state.current_loc_ohe[...,:state.num_depots][finished].bool())
         # (bs, num_agents, num_nodes)
         agent_node_mask = torch.cat((mask_depot, mask_loc_per_agent), 2).bool()
-
+        # padded agents just stay where they are
+        agent_node_mask[state.agent_pad_mask] = ~(state.current_loc_ohe[state.agent_pad_mask].bool())
+        if True:
+            curr_shelf_has_supply = ~gather_by_index(agent_node_mask, state.current_location, 2)
+            keep_agent_at_shelf = curr_shelf_has_supply & state.current_location != 0
+            agent_node_mask[keep_agent_at_shelf] = ~(state.current_loc_ohe[keep_agent_at_shelf].bool())
         return agent_node_mask
 
 
@@ -195,19 +191,29 @@ class MSPRPEnv:
 
             # add one dimension for a dummy item which can be chosen when at the depot
             mask = torch.cat((visit[:,None], mask), dim=1)
-
+            # in case of conflicts, a picker may stay at the current position. In this case, probably all
+            # skus are taken from the shelf already, making all actions infeasible. Here, we detect these
+            # cases and unmask the dummy item
+            mask[:, 0] = torch.where(mask.all(-1), False, mask[:,0])
             sku_masks.append(mask)
 
         sku_masks = torch.stack(sku_masks, dim=1)
+        # NOTE no mask for padded agents needed, as they stay at a depot and thus always select the dummy item by above logic
         return sku_masks
     
 
-    def get_reward(self, state: MSPRPState):
-        max_travel_distance_per_agent = state.tour_length.max(1).values
+    def get_reward(self, state: MSPRPState, mode: str = "val"):
+        if False:
+            distance = state.tour_length.max(1).values
+        else:
+            distance = state.tour_length.sum(1)
 
         # calc entropy over packing station utilization
         logp = F.log_softmax(state.packing_items, dim=-1)
         entropy = -(logp.exp() * logp).sum(1)
 
-        reward = -max_travel_distance_per_agent + self.params.packing_ratio_penalty * entropy
-        return reward
+        reward = distance + self.params.packing_ratio_penalty * entropy
+
+        if mode == "train":
+            reward = reward + self.params.zero_picks_penalty + state.zero_units_taken
+        return -reward

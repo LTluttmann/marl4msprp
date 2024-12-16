@@ -46,8 +46,6 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         intermediate_state = env.step(next_shelves, state)
         # get new action mask from intermediate state
         sku_mask = env.get_sku_mask(intermediate_state, next_shelves)
-        # mask all skus for padded shelf actions
-        sku_mask[~next_shelves["pad_mask"]] = True
         skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, sku_mask, env)
 
         # step through environment to get next state
@@ -65,11 +63,16 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
     
     def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
         state = state.clone()
+        masks = masks.clone()
+        actions = actions.clone()
 
         shelf_action = actions["shelf"]
         shelf_mask = masks["shelf"]
-
-        shelf_logp, shelf_entropy, shelf_loss_mask = self.shelf_decoder.get_logp_of_action(
+        bs, n_agents, _ = shelf_mask.shape
+        # unmask the "stay" action, where the agent simply stays at current node. This is 
+        # selected in case of conflicts
+        shelf_mask.scatter_(-1, state.current_location.view(bs, n_agents, 1), False)
+        shelf_logp, shelf_entropy = self.shelf_decoder.get_logp_of_action(
             embeddings, action=shelf_action, mask=shelf_mask, state=state
         )
         # update state
@@ -78,13 +81,13 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         sku_action = actions["sku"]
         sku_mask = masks["sku"]
 
-        sku_logp, sku_entropy, sku_loss_mask = self.sku_decoder.get_logp_of_action(
+        sku_logp, sku_entropy = self.sku_decoder.get_logp_of_action(
             embeddings, action=sku_action, mask=sku_mask, state=state
         )
 
         action_logp = shelf_logp + sku_logp
         entropy = shelf_entropy + sku_entropy
-        loss_mask = sku_loss_mask | shelf_loss_mask
+        loss_mask = state.agent_pad_mask
         return action_logp, entropy, loss_mask
     
     def _set_decode_strategy(self, decode_type, **kwargs):
@@ -181,10 +184,8 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 
     def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
-        bs = action.size(0)
         # get flat action indices
-        action_indices = action["idx"]
-        pad_mask = action["pad_mask"]
+        action_indices = action["idx"].clone()
 
         # get logits and mask once
         logits = self.pointer(embeddings, state)
@@ -197,14 +198,14 @@ class BaseMultiAgentDecoder(BaseDecoder):
         # get entropy
         if self.eval_multistep:
             #(bs, num_agents)
-            dist_entropys = Categorical(logits=logits).entropy()
+            dist_entropys = Categorical(
+                probs=rearrange(logp, "b (s a) -> b a s", a=state.num_agents).exp()
+            ).entropy()
         else:
             #(bs)
             dist_entropys = Categorical(probs=logp.exp()).entropy()            
         
-
-        loss_mask = ~pad_mask
-        return selected_logp, dist_entropys, loss_mask
+        return selected_logp, dist_entropys
 
 
 ################################################################
@@ -245,23 +246,30 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
                 "idx": action_idx, 
                 "agent": selected_agent, 
                 "shelf": selected_shelf,
-                "pad_mask": torch.full_like(action_idx, fill_value=True, dtype=torch.bool)
             },
             batch_size=state.batch_size
         )
         return action
     
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, _, busy_agents: list) -> Tensor:
-        bs, num_mas, num_jobs_plus_one = mask.shape
-
+    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state, busy_agents: list) -> Tensor:
+        bs, num_agents, num_nodes = mask.shape
+        updated_mask = mask.clone()
+        selected_shelf = action["shelf"]
         busy_agents = torch.stack(busy_agents, dim=1)
-        # selected_job = action["job"]
 
-        # mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
-        # mask[..., 0] = False
-        mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_jobs_plus_one), True)
+        updated_mask[..., state.num_depots:] = updated_mask.scatter(
+            -1, 
+            selected_shelf.view(bs, 1, 1).expand(-1, num_agents, 1), 
+            True
+        )[..., state.num_depots:]
+        # okay now it gets wild. We have to make sure all idle agents can select some action. Therefore, we first need to determine 
+        # which idle agents have no feasible action left (since all their feasible nodes were selected already)
+        no_action_left = updated_mask.all(-1)
+        updated_mask[no_action_left] = ~state.current_loc_ohe[no_action_left].bool()
+        # updated_mask[..., :state.num_depots] = mask[..., :state.num_depots]
+        updated_mask = updated_mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_nodes), True)
 
-        return mask
+        return updated_mask
     
 
 class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
@@ -296,20 +304,46 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
                 "idx": action_idx, 
                 "agent": selected_agent, 
                 "sku": selected_sku,
-                "pad_mask": torch.full_like(action_idx, fill_value=True, dtype=torch.bool)
             },
             batch_size=state.batch_size
         )
         return action
     
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, _, busy_agents: list) -> Tensor:
-        bs, num_mas, num_jobs_plus_one = mask.shape
+    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state: MSPRPState, busy_agents: list) -> Tensor:
+        bs, n_agents, n_jobs = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
-        # selected_job = action["job"]
+        # NOTE below code doesnt help, since state.demand is not updated between agent updates
+        # chosen_sku = action["sku"]
+        # curr_agent = action["agent"]
 
+        # pick_instance = chosen_sku != 0
+        # full_demand_taken = torch.full_like(pick_instance, fill_value=False)
+        # # subtract 1 for dummy item
+        # sku = chosen_sku[pick_instance] - 1
+        # agent = curr_agent[pick_instance]
+        # remaining_capacity = state.remaining_capacity[pick_instance, agent]
+
+        # # [BS, 1]
+        # chosen_shelf = state.current_location.gather(1, curr_agent[:, None]).squeeze(1)
+        # shelf_idx = chosen_shelf[pick_instance] - state.num_depots
+
+        # # [num_visited]
+        # demand_of_sku = state.demand[pick_instance, sku]
+        # supply_at_shelf = state.supply[pick_instance, shelf_idx, sku]
+
+        # taken_units = torch.min(demand_of_sku, supply_at_shelf)
+        # taken_units = torch.min(taken_units, remaining_capacity)
+
+        # full_demand_taken[pick_instance] = taken_units == demand_of_sku
+        # mask[full_demand_taken].scatter(
+        #     2, 
+        #     chosen_sku[full_demand_taken].view(-1,1,1).expand(-1,n_agents,n_jobs), 
+        #     True
+        # )
+        # mask[..., 0] = torch.where(mask.all(-1), False, mask[...,0])
         # mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
         # mask[..., 0] = False
-        mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_jobs_plus_one), True)
+        mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, n_jobs), True)
 
         return mask

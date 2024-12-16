@@ -58,9 +58,11 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
     def _update(self):
         losses = []
 
-        for sub_td in self.experience_sampler:
+        for _ in range(self.num_training_batches):
 
+            sub_td = self.rb.sample(self.mini_batch_size)
             sub_td = sub_td.to(self.device)
+
             weight = sub_td.get("_weight", None)
 
             logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
@@ -93,6 +95,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         orig_state = self.env.reset(batch)
         bs = orig_state.size(0)
         train_rewards = []
+        reward_std = []
         # data gathering loop
         for i in range(0, bs, self.rollout_batch_size):
 
@@ -124,10 +127,11 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             # (bs, #samples, #steps)
             states_unbs = unbatchify(state_stack, self.num_starts)
             # (bs * #samples)
-            rewards = self.env.get_reward(next_state)
-            train_rewards.append(rewards.mean())
+            rewards = self.env.get_reward(next_state, mode="train")
             # (bs, #samples)
             rewards = unbatchify(rewards, self.num_starts)
+            train_rewards.append(rewards.mean(1))
+            reward_std.append(rewards.std(1) / (-rewards.mean(1)))
             # (bs)
             best_rew, best_idx = rewards.max(dim=1)
             # (bs)
@@ -147,8 +151,10 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.rb.extend(best_states)
             self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
 
-        train_reward = torch.stack(train_rewards).mean()
-        self.log("train/reward", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
+        reward_std = torch.cat(reward_std, 0).mean()
+        train_reward = torch.cat(train_rewards, 0).mean()
+        self.log("train/reward_std", reward_std, on_epoch=True, sync_dist=True)
+        self.log("train/reward_mean", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
 
         if self.trainer.is_last_batch or self.model_params.update_after_every_batch:
             self._update()
@@ -192,11 +198,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         self.best_reward = state_dict.pop("best_reward", self.best_reward)
         # Load the remaining state_dict
         super().load_state_dict(state_dict, *args, **kwargs)
-
-    def on_fit_start(self):
-        if self.world_size > 1:
-            raise ValueError("Cant us self labeling with multiple gpus yet. Need to implement a strategy for handling the replay buffer among multiple devices")
-        
+   
     def on_train_batch_end(self, outputs, batch, batch_idx):
         super().on_train_batch_end(outputs, batch, batch_idx)
         if self.model_params.update_after_every_batch:

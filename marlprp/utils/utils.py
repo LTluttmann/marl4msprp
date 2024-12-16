@@ -145,6 +145,7 @@ class RunManager():
         self.launcher = hc.launcher._target_
         self.is_multirun = hc.mode.name == "MULTIRUN"
         self.locked_device = None
+        self.assert_idle = getattr(cfg, "assert_idle", True)
 
     @rank_zero_only
     def _enter(self):
@@ -152,7 +153,7 @@ class RunManager():
             self.set_and_lock_gpu(devices=self.cfg.train.devices)
             device = [self.locked_device]
         else:
-            device = determine_devices(self.cfg.train.devices)
+            device = determine_devices(self.cfg.train.devices, assert_idle=self.assert_idle)
         
         accelerator = "gpu" if torch.cuda.is_available() else "cpu"  # TODO support MPS?
         self.cfg.train.devices = device

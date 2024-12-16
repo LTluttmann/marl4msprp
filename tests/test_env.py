@@ -5,7 +5,7 @@ from tensordict import TensorDict
 from einops import rearrange
 from marlprp.env.env import MSPRPEnv
 from marlprp.utils.config import EnvParams
-
+from marlprp.utils.dataset import EnvLoader
 
 @pytest.mark.parametrize("num_agents", [2])
 def test_env(num_agents):
@@ -75,3 +75,17 @@ def test_env(num_agents):
 
     reward = env.get_reward(tc)
     print(reward)
+
+
+@pytest.mark.parametrize("instance_path", ["../data_test/luttmann/10s-3i-20p/"])
+def test_w_lt_instances(instance_path):
+    import os
+    data_path=os.path.join(instance_path, "td_data.pth")
+    solution_path=os.path.join(instance_path, "solution.pth")
+    env = MSPRPEnv(EnvParams())
+    dl = EnvLoader(env, batch_size=1, path=data_path)
+    solution = torch.load(solution_path)
+    for td, sol in zip(dl, solution):
+
+        state = env.reset(td)
+        ...

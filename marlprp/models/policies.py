@@ -30,6 +30,9 @@ class RoutingPolicy(nn.Module):
         PolicyCls = policy_registry.get(params.policy)
         return PolicyCls(params)
 
+    @property
+    def mode(self):
+        return "train" if self.training else "val"
 
     def forward(
             self, 
@@ -53,7 +56,7 @@ class RoutingPolicy(nn.Module):
         # prepare return td
         return_dict = {
             "state": state,
-            "reward": env.get_reward(state),
+            "reward": env.get_reward(state, mode=self.mode),
             "log_likelihood": log_ps.sum(1),
         }
 
@@ -64,7 +67,6 @@ class RoutingPolicy(nn.Module):
 
     def act(self, state: MSPRPState, env: MSPRPEnv, return_logp: bool = True):
         embeddings = self.encoder(state)
-        state, embeddings = self.decoder.pre_decoding_hook(state, embeddings)
         td = self.decoder(embeddings, state, env, return_logp=return_logp)
         return td
     
@@ -80,8 +82,7 @@ class RoutingPolicy(nn.Module):
             value_pred = self.critic(embeddings, state)
         else:
             value_pred = None
-        # pre decoder / actor hook
-        state, embeddings = self.decoder.pre_decoding_hook(state, embeddings)
+
         action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, actions, action_masks, state)
 
         return action_logprobs, value_pred, entropies, mask

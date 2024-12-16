@@ -1,5 +1,5 @@
+import math
 import copy
-import logging
 from omegaconf import ListConfig
 from rich.logging import RichHandler
 from typing import Dict, Type, Any, Union
@@ -15,10 +15,10 @@ from rl4co.utils.optim_helpers import create_scheduler
 from marlprp.env.env import MSPRPEnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.utils import monitor_lr_changes
-from marlprp.utils.ops import all_gather_w_padding
 from marlprp.utils.logger import get_lightning_logger
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
-from marlprp.algorithms.utils import SampleGenerator, NumericParameter, make_replay_buffer
+from marlprp.utils.ops import all_gather_w_padding, all_gather_numeric
+from marlprp.algorithms.utils import NumericParameter, make_replay_buffer
 from marlprp.algorithms.model_args import ModelParams, ModelWithReplayBufferParams
 from marlprp.utils.config import (
     EnvParams,
@@ -398,14 +398,15 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         )
         torch.manual_seed(1234567)
         self.model_params: ModelWithReplayBufferParams
-
+        self.inner_epochs = self.setup_parameter(model_params.inner_epochs)
+        self._ref_model_temp = self.setup_parameter(model_params.ref_model_temp)
         # setup reference policy
         self.policy_old = copy.deepcopy(self.policy)
         self.policy_old.set_decode_type(
             decode_type="sampling", 
             tanh_clipping=train_params.decoding["tanh_clipping"],
             top_p=train_params.decoding["top_p"],
-            temperature=model_params.ref_model_temp
+            temperature=self.ref_model_temp
         )
 
         # get rollout batch size
@@ -418,52 +419,27 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         if isinstance(mini_batch_size, float):
             mini_batch_size = int(mini_batch_size * train_params.batch_size)
         self.mini_batch_size = mini_batch_size
+
         # make replay buffer
         self.rb = make_replay_buffer(
             buffer_size=model_params.buffer_size, 
-            batch_size=self.mini_batch_size, 
+            # batch_size=self.mini_batch_size, 
             device=model_params.buffer_storage_device, 
             priority_key=model_params.priority_key,
             **model_params.buffer_kwargs
         )
-        self.setup_inner_training_loop()
-
-
-    def setup_inner_training_loop(self):
-        if self.model_params.num_batches is not None and self.model_params.inner_epochs is not None:
-            raise ValueError("Cannot use both, num_batches and inner_epochs for inner training loop")
-        # got to initialize the backup attributes first, so that setup_experience_sampler in the setter doesnt fail
-        if self.model_params.num_batches is not None:
-            self._inner_epochs = None
-            self.num_batches = self.setup_parameter(self.model_params.num_batches, dtype=int)
-        else:
-            self._num_batches = None
-            self.inner_epochs = self.setup_parameter(self.model_params.inner_epochs, dtype=int)
-
-    def setup_experience_sampler(self):
-        self.experience_sampler = SampleGenerator(
-            rb=self.rb, 
-            num_iter=self.inner_epochs, 
-            num_samples=self.num_batches
-        )
 
     @property
-    def num_batches(self):
-        return self._num_batches
-    
-    @num_batches.setter
-    def num_batches(self, value):
-        self._num_batches = value
-        self.setup_experience_sampler()
-
-    @property
-    def inner_epochs(self):
-        return self._inner_epochs
-    
-    @inner_epochs.setter
-    def inner_epochs(self, value):
-        self._inner_epochs = value
-        self.setup_experience_sampler()
+    def num_training_batches(self):
+        # one complete iteration through the rb uses ceil(||rb|| / bs) batches. 
+        # We multiple this by inner_epochs, to do inner_epochs iters through rb
+        num_batches = int(self.inner_epochs * math.ceil(len(self.rb) / self.mini_batch_size))
+        if self.world_size > 1:
+            # in distributed settings, the number of batches determined above could be different
+            # among ranks. Since this would cause ddp to fail, we take the max over ranks here
+            all_num_batches = all_gather_numeric(num_batches, self.world_size, self.device)
+            num_batches = max(all_num_batches).item()
+        return num_batches
 
     @property
     def rollout_batch_size(self):
@@ -472,6 +448,29 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     @rollout_batch_size.setter
     def rollout_batch_size(self, value):
         self._rollout_batch_size = value
+
+    @property
+    def mini_batch_size(self):
+        return int(self._mini_batch_size / self.world_size)
+    
+    @mini_batch_size.setter
+    def mini_batch_size(self, value):
+        self._mini_batch_size = value
+
+
+    @property
+    def ref_model_temp(self):
+        return self._ref_model_temp
+
+    @ref_model_temp.setter
+    def ref_model_temp(self, value):
+        self.ref_model_temp = value
+        self.policy_old.set_decode_type(
+            decode_type="sampling", 
+            tanh_clipping=self.train_params.decoding["tanh_clipping"],
+            top_p=self.train_params.decoding["top_p"],
+            temperature=self.ref_model_temp
+        )  
 
 
 

@@ -38,15 +38,15 @@ class MSPRPGenerator:
         else:
             self.max_supply = instance_params.max_supply
 
-        self.num_agents = instance_params.num_agents
+        self._num_agents = instance_params.num_agents
 
-    def _simulate_batch(self, batch_size: tuple):
+    def _simulate_batch(self, bs: tuple):
         # simulate supply [BS, P, S]
 
         supply = torch.randint(
             low=self.min_supply, 
             high=self.max_supply+1, 
-            size=(*batch_size, self.num_shelves, self.num_skus),
+            size=(*bs, self.num_shelves, self.num_skus),
             dtype=torch.float32
         )
 
@@ -54,27 +54,27 @@ class MSPRPGenerator:
         demand = torch.randint(
             low=self.min_demand, 
             high=self.max_demand+1, 
-            size=(*batch_size, self.num_skus),
+            size=(*bs, self.num_skus),
             dtype=torch.float32
         )
 
         num_nodes = self.num_shelves + self.num_depots
         # simulate shelf locations as x,y coordinates in a unit circle [BS, S, 2]
-        coordinates = torch.rand((*batch_size, num_nodes, 2))
+        coordinates = torch.rand((*bs, num_nodes, 2))
 
         # simulate for each batch a series of indices which correspond to the item/shelf combinations for 
         # which supply is available: [BS, PS], where PS is the number of desired physical items in the warehouse
-        idx = torch.argsort(torch.rand(*batch_size, np.prod(self.size_tuple)))[:,:self.num_storage_locations]
+        idx = torch.argsort(torch.rand(*bs, np.prod(self.size_tuple)))[:,:self.num_storage_locations]
         # in order to select only those supply nodes which were sampled in idx, flatten the supply tensor [BS, P*S]. 
         # Select only entries from supply which were sampled in idx and use entries of zeros tensor otherwise. 
         # In the end reshape to [BS, P, S]
         supply = torch.scatter(
-            torch.zeros(*batch_size, np.prod(self.size_tuple)), 
+            torch.zeros(*bs, np.prod(self.size_tuple)), 
             dim=1, 
             index=idx, 
-            src=supply.view(*batch_size, -1)
+            src=supply.view(*bs, -1)
         )
-        supply = supply.view(*batch_size, self.num_shelves, self.num_skus)
+        supply = supply.view(*bs, self.num_shelves, self.num_skus)
 
         assert torch.all((supply>0).sum((1,2)).eq(self.num_storage_locations))
 
@@ -82,22 +82,26 @@ class MSPRPGenerator:
         demand = torch.minimum(demand, supply.sum(1))
         assert not demand.eq(0).all()
 
-        if self.num_agents is None:
-            self.num_agents = torch.ceil(demand.sum(-1) / self.capacity)
-            max_num_agents = self.num_agents.max()
-            agent_pad_mask = torch.arange(1, max_num_agents+1).view(1,-1).expand(*batch_size, max_num_agents).le(max_num_agents)
-
-        current_location = torch.randint(0, self.num_depots, size=(*batch_size, self.num_agents))
-        capacity = torch.full((*batch_size, self.num_agents), fill_value=self.capacity, dtype=torch.float32)
+        if self._num_agents is None:
+            num_agents = torch.ceil(demand.sum(-1, keepdim=True) / self.capacity)
+            max_num_agents = int(num_agents.max().item())
+            agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*bs, max_num_agents)
+            num_agents = max_num_agents
+        else:
+            num_agents = self._num_agents
+            agent_pad_mask = torch.full((*bs, num_agents), fill_value=False)
+        current_location = torch.randint(0, self.num_depots, size=(*bs, num_agents))
+        capacity = torch.full((*bs, num_agents), fill_value=self.capacity, dtype=torch.float32)
         return TensorDict(
             {
                 "demand": demand,
                 "supply": supply,
                 "coordinates": coordinates,
                 "current_location": current_location,
-                "remaining_capacity": capacity
+                "remaining_capacity": capacity,
+                "agent_pad_mask": agent_pad_mask
             }, 
-            batch_size=batch_size
+            batch_size=bs
         )
         
 

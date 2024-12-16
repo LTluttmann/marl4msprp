@@ -1,45 +1,45 @@
 import torch
+import torch.nn.functional as F
 from tensordict import tensorclass
-from dataclasses import field
 
 
 @tensorclass
 class MSPRPState:
-    _num_depots: str
     supply: torch.Tensor
     demand: torch.Tensor
     coordinates: torch.Tensor
     current_location: torch.Tensor
     remaining_capacity: torch.Tensor
+    agent_pad_mask: torch.Tensor
     tour_length: torch.Tensor = None
     packing_items: torch.Tensor = None
     init_capacity: torch.Tensor = None
-    # shelf_mask: torch.Tensor = None
-    # sku_mask: torch.Tensor = None
-    # _is_intermediate: str = "False"
+    zero_units_taken: torch.Tensor = None
 
     @classmethod
     def initialize(
         cls,
-        num_depots: int,
         supply: torch.Tensor,
         demand: torch.Tensor,
         coordinates: torch.Tensor,
         current_location: torch.Tensor,
         remaining_capacity: torch.Tensor,
+        agent_pad_mask: torch.Tensor = None,
         tour_length: torch.Tensor = None,
-        packing_items: torch.Tensor = None
+        packing_items: torch.Tensor = None,
+        zero_units_taken: torch.Tensor = None,
     ) -> "MSPRPState":
         batch_size = supply.size(0)
         return cls(
-            _num_depots=str(num_depots),
             supply=supply,
             demand=demand,
             coordinates=coordinates,
             current_location=current_location,
             remaining_capacity=remaining_capacity,
+            agent_pad_mask=agent_pad_mask,
             tour_length=tour_length,
             packing_items=packing_items,
+            zero_units_taken=zero_units_taken,
             batch_size=[batch_size],
             device=supply.device
         )
@@ -62,9 +62,27 @@ class MSPRPState:
         if self.init_capacity is None:
             self.init_capacity = self.remaining_capacity.clone()
 
+        if self.agent_pad_mask is None:
+            self.agent_pad_mask = torch.full(
+                (*self.batch_size, self.num_agents),
+                fill_value=False,
+                dtype=torch.bool,
+                device=self.device
+            )
+        if self.zero_units_taken is None:
+            self.zero_units_taken = torch.zeros(self.batch_size, device=self.device)
+
+    @property
+    def capacity(self):
+        return self.init_capacity.max().item()
+
     @property
     def num_shelves(self):
-        return self.coordinates.size(1) - self.num_depots
+        return self.supply.size(1)
+
+    @property
+    def num_nodes(self):
+        return self.coordinates.size(1)
 
     @property
     def num_skus(self):
@@ -72,7 +90,7 @@ class MSPRPState:
 
     @property
     def num_depots(self):
-        return int(self._num_depots)
+        return self.num_nodes - self.num_shelves
 
     @property
     def num_agents(self):
@@ -103,3 +121,10 @@ class MSPRPState:
     def done(self):
         # (bs)
         return (self.demand.le(1e-5).all(-1) & self.agent_at_depot().all(-1))
+    
+    @property
+    def current_loc_ohe(self):
+        return F.one_hot(
+            self.current_location, 
+            num_classes=self.num_shelves + self.num_depots
+        )
