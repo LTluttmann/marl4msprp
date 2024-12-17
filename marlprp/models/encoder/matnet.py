@@ -116,7 +116,7 @@ class MatNetEncoder(BaseEncoder):
 
     def forward(self, state: MSPRPState) -> MatNetEncoderOutput:
         # (bs, jobs, ops, emb); (bs, ma, emb); (bs, jobs*ops, ma)
-        depot_emb, shelf_emb, sku_emb, edge_feat = self.init_embedding(state)
+        node_emb, sku_emb, edge_feat = self.init_embedding(state)
 
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
@@ -126,13 +126,13 @@ class MatNetEncoder(BaseEncoder):
 
         # run through the layers 
         for layer in self.encoder:
-            shelf_emb, sku_emb = layer(
-                shelf_emb, 
+            node_emb, sku_emb = layer(
+                node_emb, 
                 sku_emb, 
                 cost_mat=edge_feat, 
                 cross_mask=cross_mask,
             )
-        node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
+        
         return TensorDict(
             {"shelf": node_emb, "sku": sku_emb}, 
             batch_size=state.batch_size

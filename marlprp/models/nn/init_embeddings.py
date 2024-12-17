@@ -60,13 +60,16 @@ class MultiAgentInitEmbedding(nn.Module):
         return self.sku_proj(feats)
     
     def _init_edge_embed(self, state: MSPRPState):
-        supply_scaled = state.supply.clone() / self.capacity[..., None]
+        supply_scaled = state.supply_w_depot.clone() / self.capacity[..., None]
         return supply_scaled
     
     def forward(self, tc: MSPRPState):
         self.capacity = tc.init_capacity.max(1, keepdims = True).values
+
         depot_emb = self._init_depot_embed(tc)
         shelf_emb = self._init_shelf_embed(tc)
         sku_emb = self._init_sku_embed(tc)
         edge_emb = self._init_edge_embed(tc)
-        return depot_emb, shelf_emb, sku_emb, edge_emb
+
+        node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
+        return node_emb, sku_emb, edge_emb
