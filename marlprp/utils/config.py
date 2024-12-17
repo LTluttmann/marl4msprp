@@ -32,20 +32,20 @@ class BaseEnvParams:
     name: str
     id: str = None
 
-    num_agents: int = None
+    num_agents: int = 1
     num_depots: Union[List, int] = 1
     num_shelves: Union[List, int] = 10
     
     avg_loc_per_sku: int = None
-    num_storage_locations: Optional[int] = None
+    num_storage_locations: Optional[int] = 20
 
     min_demand: int = 0
-    max_demand: int = 10
+    max_demand: int = 4
     min_supply: int = 1
     max_supply: int = None # will be calculated 
     avg_supply_to_demand_ratio: float = 2
 
-    capacity: int = 20
+    capacity: int = 6
 
     is_multi_instance: bool = field(init=False)
     
@@ -85,7 +85,7 @@ class BaseEnvParams:
 @dataclass(kw_only=True)
 class EnvParams(BaseEnvParams):
     name: str = "msprp"
-    num_skus: Union[List, int] = 20
+    num_skus: Union[List, int] = 3
 
     def __post_init__(self):
         super().__post_init__()

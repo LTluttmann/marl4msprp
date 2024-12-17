@@ -46,13 +46,14 @@ class MSPRPEnv:
             agent = action["agent"]
             shelf = action.get("shelf", None)
             sku = action.get("sku", None)
+            units = action.get("units", None)
 
             if shelf is not None:
                 state = self._update_from_shelf(state, shelf, current_agent=agent)
                 #state.sku_mask = self.get_sku_mask(state)
 
             if sku is not None:
-                state = self._update_from_sku(state, sku, curr_agent=agent)
+                state = self._update_from_sku(state, sku, curr_agent=agent, units=units)
                 #state.shelf_mask = self.get_node_mask(state)
 
         return state
@@ -85,7 +86,7 @@ class MSPRPEnv:
         # state.is_intermediate = True
         return state
 
-    def _update_from_sku(self, state: MSPRPState, chosen_sku: torch.Tensor, curr_agent: torch.Tensor):
+    def _update_from_sku(self, state: MSPRPState, chosen_sku: torch.Tensor, curr_agent: torch.Tensor, units: torch.Tensor = None):
         """
         :param chosen_sku: [BS]
         """
@@ -107,8 +108,13 @@ class MSPRPEnv:
         demand_of_sku = state.demand[pick_instance, chosen_sku]
         supply_at_shelf = state.supply[pick_instance, shelf_idx, chosen_sku]
 
-        taken_units = torch.min(demand_of_sku, supply_at_shelf)
-        taken_units = torch.min(taken_units, remaining_capacity)
+        if units is not None:
+            taken_units = units[pick_instance]
+            assert taken_units.le(torch.min(torch.min(demand_of_sku, supply_at_shelf), remaining_capacity)).all()
+        else:
+            taken_units = torch.min(demand_of_sku, supply_at_shelf)
+            taken_units = torch.min(taken_units, remaining_capacity)
+
         state.zero_units_taken[pick_instance] += taken_units.eq(0).int()
 
         state.supply[pick_instance, shelf_idx, chosen_sku] -= taken_units
