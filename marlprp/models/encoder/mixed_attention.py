@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.modules.transformer import _get_activation_fn
 import math
 from einops import rearrange
 from marlprp.models.policy_args import MatNetParams
@@ -51,6 +52,7 @@ class MixedScoreFF(nn.Module):
         self.lin1 = nn.Linear(2 * num_heads, num_heads * ms_hidden_dim, bias=False)
         self.lin2 = nn.Linear(num_heads * ms_hidden_dim, num_heads, bias=False)
 
+        self.activation = _get_activation_fn(params.activation)
         nn.init.uniform_(self.lin1.weight, a=-mix1_init, b=mix1_init)
         nn.init.uniform_(self.lin2.weight, a=-mix2_init, b=mix2_init)
 
@@ -62,7 +64,7 @@ class MixedScoreFF(nn.Module):
         two_scores = rearrange(two_scores, "b h r c s -> b r c (h s)")
         # shape: (batch, row_cnt, col_cnt, 2 * num_heads)
         ms1 = self.lin1(two_scores)
-        ms1_activated = F.relu(ms1)
+        ms1_activated = self.activation(ms1)
         # shape: (batch, row_cnt, col_cnt, num_heads)
         ms2 = self.lin2(ms1_activated)
         # shape: (batch, row_cnt, head_num, col_cnt)

@@ -183,7 +183,9 @@ class ModelParams:
 
     def __post_init__(self):
         self.policy.stepwise_encoding = self.stepwise_encoding
-        self.eval_multistep = self.eval_multistep and self.policy.is_multiagent_policy
+        self.eval_multistep = self.eval_multistep and self.policy.is_multiagent_policy and (
+            self.policy.env.num_agents is None or self.policy.env.num_agents > 1
+        )
         self.eval_per_agent = self.eval_per_agent and self.eval_multistep
         self.policy.eval_multistep = self.eval_multistep
         self.policy.eval_per_agent = self.eval_per_agent
@@ -298,7 +300,8 @@ class ValidationParams:
             "tanh_clipping": self.tanh_clipping,
             "top_p": self.top_p,
             "temperature": self.temperature,
-            "num_decoding_samples": self.num_decoding_samples
+            "num_decoding_samples": self.num_decoding_samples,
+            "store": True
         }
 
 @dataclass
@@ -327,5 +330,6 @@ class TestParams:
             "tanh_clipping": self.tanh_clipping,
             "top_p": self.top_p,
             "temperature": self.temperature,
-            "num_decoding_samples": self.num_decoding_samples
+            "num_decoding_samples": self.num_decoding_samples,
+            "store": True
         }

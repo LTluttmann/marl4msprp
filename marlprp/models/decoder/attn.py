@@ -1,19 +1,18 @@
+import math
 import torch
 from torch import nn
 from torch import Tensor
+from einops import rearrange
 import torch.nn.functional as F
-from tensordict import TensorDict
-from einops import rearrange, einsum
-import math
+from torch.nn.modules.normalization import LayerNorm
 
+from marlprp.models.nn.misc import MLP
 from marlprp.env.instance import MSPRPState
-from marlprp.models.encoder.base import MatNetEncoderOutput
-from marlprp.models.nn.misc import MHAWaitOperationEncoder
-from marlprp.models.decoder.base import BasePointer
-from marlprp.models.policy_args import TransformerParams, MahamParams
-from marlprp.utils.ops import gather_by_index
 from marlprp.models.nn.kvl import get_kvl_emb
+from marlprp.models.decoder.base import BasePointer
 from marlprp.models.nn.context import get_context_emb
+from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.policy_args import TransformerParams, MahamParams
 
 
 
@@ -45,8 +44,9 @@ class AttentionPointerMechanism(nn.Module):
             params.embed_dim, params.embed_dim, bias=False
         )
         if params.use_rezero:
-            self.resweight = nn.Parameter(torch.rand(1))
+            self.resweight = nn.Parameter(torch.tensor(0.))
         else:
+            self.norm = LayerNorm(params.embed_dim)
             self.resweight = 1
         self.dropout = nn.Dropout(params.dropout)
         self.check_nan = check_nan
@@ -66,8 +66,9 @@ class AttentionPointerMechanism(nn.Module):
         heads = self._inner_mha(query, key, value, attn_mask)
         # (bs, m, d); NOTE use ReZERO logic here
         glimpse = self.dropout(self.project_out(heads))
-        glimpse = (1-self.resweight) * query + self.resweight * glimpse
-
+        glimpse = query + self.resweight * glimpse
+        if hasattr(self, "norm"):
+            glimpse = self.norm(glimpse)
         # Batch matrix multiplication to compute logits (batch_size, num_steps, graph_size)
         # bmm is slightly faster than einsum and matmul
         logits = torch.bmm(glimpse, logit_key.transpose(-2, -1)) / math.sqrt(glimpse.size(-1))
@@ -111,6 +112,7 @@ class AttentionPointer(BasePointer):
         self.pointer = AttentionPointerMechanism(params, check_nan)
         self.context_embedding = get_context_emb(params, key=decoder_type)
         self.kvl_emb = get_kvl_emb(params, key=decoder_type)
+        self.agent_ranker = MLP(self.emb_dim, 1, num_neurons=[self.emb_dim, self.emb_dim])
 
 
     @property
@@ -123,13 +125,19 @@ class AttentionPointer(BasePointer):
 
     def forward(self, embs: MatNetEncoderOutput, state: MSPRPState, attn_mask: Tensor = None):
 
-        # (bs, m, emb)
+        # (bs, a, emb)
         q = self.context_embedding(embs, state)
 
         # (bs, heads, nodes, key_dim) | (bs, heads, nodes, key_dim)  |  (bs, nodes, emb_dim)
         k, v, logit_key = self.kvl_emb(embs, state)
-
+        # (b, a, nodes)
         logits = self.pointer(q, k, v, logit_key, attn_mask=attn_mask)
-
         return logits
+        # # (b, a, 1)
+        # ranking_scores = self.agent_ranker(q)
+        # # (b, a, a)
+        # s_t_s = torch.abs(ranking_scores - ranking_scores(0, 2, 1))
+        # # (b, a, nodes)
+        # logits_ranked = torch.bmm(s_t_s, logits)
+        # return logits_ranked
 

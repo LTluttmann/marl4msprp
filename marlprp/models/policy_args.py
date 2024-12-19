@@ -23,7 +23,8 @@ class TransformerParams(PolicyParams):
 class MatNetParams(TransformerParams):
     policy: str = "matnet"
     ms_hidden_dim: int = None
-    mask_no_edge: bool = True
+    mask_no_edge: bool = False
+    decoder_attn_mask: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -35,4 +36,3 @@ class MahamParams(MatNetParams):
     policy: str = "maham"
     use_communication: bool = True
     use_rezero: bool = True
-

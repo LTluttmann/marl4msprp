@@ -10,7 +10,7 @@ from typing import TypedDict, Tuple
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.env.instance import MSPRPState
-from marlprp.utils.config import PolicyParams
+from marlprp.models.policy_args import MahamParams
 from marlprp.utils.ops import gather_by_index, batchify
 from marlprp.models.encoder.base import MatNetEncoderOutput
 
@@ -113,7 +113,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
 
 
 class BaseMultiAgentDecoder(BaseDecoder):
-    def __init__(self, pointer, params: PolicyParams) -> None:
+    def __init__(self, pointer, params: MahamParams) -> None:
         super().__init__(params)
         self.pointer = pointer
         self.eval_multistep = params.eval_multistep
@@ -129,7 +129,8 @@ class BaseMultiAgentDecoder(BaseDecoder):
     ):
         num_agents = state.num_agents
         # get logits and mask
-        logits = self.pointer(embeddings, state)
+        attn_mask = self.get_attn_mask(state, env)
+        logits = self.pointer(embeddings, state, attn_mask=attn_mask)
         mask = mask.clone()
         # initialize action buffer
         actions = []
@@ -168,6 +169,9 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
         return actions, logps
 
+    def get_attn_mask(self, state, env):
+        return None
+
     @abc.abstractmethod
     def _logits_to_logp(self, logits, mask) -> Tuple[Tensor, Tensor]:
         pass
@@ -202,8 +206,8 @@ class BaseMultiAgentDecoder(BaseDecoder):
                 probs=rearrange(logp, "b (s a) -> b a s", a=state.num_agents).exp()
             ).entropy()
         else:
-            #(bs)
-            dist_entropys = Categorical(probs=logp.exp()).entropy()            
+            #(bs, 1)
+            dist_entropys = Categorical(probs=logp.exp()).entropy().unsqueeze(-1)
         
         return selected_logp, dist_entropys
 
@@ -215,10 +219,11 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 
-    def __init__(self, params: PolicyParams) -> None:
+    def __init__(self, params: MahamParams) -> None:
         self.embed_dim = params.embed_dim
         pointer = AttentionPointer(params, decoder_type="shelf")
         super().__init__(pointer=pointer, params=params)
+        self.use_attn_mask = params.decoder_attn_mask
 
     def _logits_to_logp(self, logits, mask):
         if torch.is_grad_enabled() and self.eval_per_agent:
@@ -257,6 +262,7 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         selected_shelf = action["shelf"]
         busy_agents = torch.stack(busy_agents, dim=1)
 
+        # mask a shelf (not depot) if it got selected
         updated_mask[..., state.num_depots:] = updated_mask.scatter(
             -1, 
             selected_shelf.view(bs, 1, 1).expand(-1, num_agents, 1), 
@@ -271,13 +277,19 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 
         return updated_mask
     
+    def get_attn_mask(self, state: MSPRPState, env: MSPRPEnv):
+        # in F.scaled_dot_product_attn, True mean "attend", False means not attend
+        if self.use_attn_mask:  
+            return ~env.get_node_mask(state)
+    
 
 class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
 
-    def __init__(self, params: PolicyParams) -> None:
+    def __init__(self, params: MahamParams) -> None:
         self.embed_dim = params.embed_dim
         pointer = AttentionPointer(params, decoder_type="sku")
         super().__init__(pointer=pointer, params=params)
+        self.use_attn_mask = params.decoder_attn_mask
 
     def _logits_to_logp(self, logits, mask):
         if torch.is_grad_enabled() and self.eval_per_agent:
@@ -347,3 +359,11 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, n_jobs), True)
 
         return mask
+
+
+    def get_attn_mask(self, state: MSPRPState, env: MSPRPEnv):
+        # omit dummy item mask
+        # in F.scaled_dot_product_attn, True mean "attend", False means not attend
+        if self.use_attn_mask:  
+            return ~env.get_sku_mask(state)
+    

@@ -14,7 +14,7 @@ model:
   listnet_alpha: 0.0
   lookback_intervals: 0
   always_clear_buffer: true
-  update_after_every_batch: false
+  update_after_every_batch: true
 
 
 callbacks:

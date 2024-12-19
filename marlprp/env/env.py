@@ -137,6 +137,7 @@ class MSPRPEnv:
         # (bs, num_agents, num_shelves)
         mask_loc_per_agent = has_no_capacity[..., None] | mask_loc[:, None]
         no_more_demand = state.demand.eq(0).all(1)
+
         if self.params.always_mask_depot:
             mask_depot = ~mask_loc_per_agent.all(-1, keepdims=True).repeat(1, 1, state.num_depots)
         else:
@@ -145,6 +146,7 @@ class MSPRPEnv:
             mask_depot = state.agent_at_depot() & ~no_more_demand[:, None]
             # (bs, num_agents, num_depots)
             mask_depot = mask_depot[..., None].repeat(1, 1, state.num_depots)
+            
         # for finished (i.e. no demand and back at depot) instances, mask all but current node
         finished = state.agent_at_depot() & no_more_demand[:, None]
         mask_depot[finished] = ~(state.current_loc_ohe[...,:state.num_depots][finished].bool())
@@ -152,10 +154,10 @@ class MSPRPEnv:
         agent_node_mask = torch.cat((mask_depot, mask_loc_per_agent), 2).bool()
         # padded agents just stay where they are
         agent_node_mask[state.agent_pad_mask] = ~(state.current_loc_ohe[state.agent_pad_mask].bool())
-        if True:
-            curr_shelf_has_supply = ~gather_by_index(agent_node_mask, state.current_location, 2)
-            keep_agent_at_shelf = curr_shelf_has_supply & state.current_location != 0
-            agent_node_mask[keep_agent_at_shelf] = ~(state.current_loc_ohe[keep_agent_at_shelf].bool())
+        # if True:
+        #     curr_shelf_has_supply = ~gather_by_index(agent_node_mask, state.current_location, 2)
+        #     keep_agent_at_shelf = curr_shelf_has_supply & state.current_location != 0
+        #     agent_node_mask[keep_agent_at_shelf] = ~(state.current_loc_ohe[keep_agent_at_shelf].bool())
         return agent_node_mask
 
 

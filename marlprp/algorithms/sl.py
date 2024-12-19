@@ -1,3 +1,4 @@
+import gc
 import copy
 from functools import partial
 
@@ -100,6 +101,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         for i in range(0, bs, self.rollout_batch_size):
 
             next_state = orig_state[i : i + self.rollout_batch_size]
+
             next_state = batchify(next_state, self.num_starts)
             state_stack = []
             steps = 0
@@ -149,7 +151,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             best_states = best_states[~best_states["state"].done]
             # save to memory
             self.rb.extend(best_states)
-            self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
+            # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
 
         reward_std = torch.cat(reward_std, 0).mean()
         train_reward = torch.cat(train_rewards, 0).mean()
@@ -180,6 +182,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         if self.model_params.always_clear_buffer or improved:
             self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
             self.rb.empty()
+            gc.collect()
             torch.cuda.empty_cache()
 
         if (self.current_epoch + 1) % self.lookback_intervals == 0:

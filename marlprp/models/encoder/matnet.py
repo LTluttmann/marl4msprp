@@ -1,7 +1,5 @@
-import torch
-from einops import rearrange
-from tensordict import TensorDict
 from torch import nn
+from tensordict import TensorDict
 from torch.nn.modules import TransformerEncoderLayer
 from torch.nn.modules.normalization import LayerNorm
 
@@ -120,7 +118,8 @@ class MatNetEncoder(BaseEncoder):
 
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
-            cross_mask = state.supply.gt(0).clone()
+            cross_mask = edge_feat.gt(0)
+            cross_mask[:, :state.num_depots] = True
         else:
             cross_mask = None
 

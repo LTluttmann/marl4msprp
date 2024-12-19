@@ -27,7 +27,7 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
     algorithm: str = "sl"
     num_starts: int = 100
     entropy_coef: float = 0. # 0.05
-    loss: str = "ce"
+    loss: str = None
     listnet_alpha: float = 0.0
     lookback_intervals: int = None
     always_clear_buffer: bool = False
@@ -49,11 +49,6 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
         else:
             # we evaluate one action per time, both losses are identical
             self.loss = "ce"
-
-
-@dataclass(kw_only=True)
-class ContrastivePolicyLearningParameters(SelfLabelingParameters):
-    algorithm: str = "cpl"
 
 
 @dataclass(kw_only=True)

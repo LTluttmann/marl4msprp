@@ -98,8 +98,10 @@ class SkuKVL(nn.Module):
         v_dyn = v + glimpse_v_dyn
         l_dyn = l + logit_k_dyn
 
+        k_dyn_w_dummy_sku = torch.cat((self.dummy.expand(*bs, 1, -1), k_dyn), dim=1)
+        v_dyn_w_dummy_sku = torch.cat((self.dummy.expand(*bs, 1, -1), v_dyn), dim=1)
         l_dyn_w_dummy_sku = torch.cat((self.dummy.expand(*bs, 1, -1), l_dyn), dim=1)
-        return k_dyn, v_dyn, l_dyn_w_dummy_sku
+        return k_dyn_w_dummy_sku, v_dyn_w_dummy_sku, l_dyn_w_dummy_sku
 
 
 class StaticEmbedding(nn.Module):

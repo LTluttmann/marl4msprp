@@ -35,11 +35,7 @@ def simple_listnet_loss(
         entropy_coef: float = 0,
         **kwargs
     ):
-    """ListNet inspired loss. This loss assumes that the logps are ordered corresponding to the
-    order the machinens sampled actions during experience collection. The loss enforces a precendence
-    by weighting machines that sampled first stronger. This makes intuitive sense, because these agents
-    disrupted the sampling space of succeeding machines
-    """
+
     bs = logp.size(0)
     # (bs, num_actions)
     logp = logp.view(bs, -1)

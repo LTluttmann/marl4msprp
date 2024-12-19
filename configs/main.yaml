@@ -13,7 +13,7 @@ run_name: ${env.num_shelves}s-${env.num_skus}i-${env.num_storage_locations}p
 
 train:  
   train: true
-  dataset_size: 10000
+  dataset_size: 20000
   batch_size: 2000
   lr_scheduler:
     "MultiStepLR"
