@@ -12,6 +12,7 @@ class TransformerParams(PolicyParams):
     num_decoder_ff_layers: int = 2
     activation: str = "gelu"
     norm_first: bool = False # True
+    scale_supply_by_demand: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -35,4 +36,4 @@ class MatNetParams(TransformerParams):
 class MahamParams(MatNetParams):
     policy: str = "maham"
     use_communication: bool = True
-    use_rezero: bool = True
+    use_rezero: bool = False

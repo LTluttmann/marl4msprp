@@ -9,11 +9,11 @@ class MSPRPState:
     demand: torch.Tensor
     coordinates: torch.Tensor
     current_location: torch.Tensor
-    remaining_capacity: torch.Tensor
+    init_capacity: torch.Tensor
     agent_pad_mask: torch.Tensor
     tour_length: torch.Tensor = None
     packing_items: torch.Tensor = None
-    init_capacity: torch.Tensor = None
+    remaining_capacity: torch.Tensor = None
     zero_units_taken: torch.Tensor = None
 
     @classmethod
@@ -23,7 +23,7 @@ class MSPRPState:
         demand: torch.Tensor,
         coordinates: torch.Tensor,
         current_location: torch.Tensor,
-        remaining_capacity: torch.Tensor,
+        init_capacity: torch.Tensor,
         agent_pad_mask: torch.Tensor = None,
         tour_length: torch.Tensor = None,
         packing_items: torch.Tensor = None,
@@ -35,7 +35,7 @@ class MSPRPState:
             demand=demand,
             coordinates=coordinates,
             current_location=current_location,
-            remaining_capacity=remaining_capacity,
+            init_capacity=init_capacity,
             agent_pad_mask=agent_pad_mask,
             tour_length=tour_length,
             packing_items=packing_items,
@@ -59,8 +59,8 @@ class MSPRPState:
                 device=self.device
             )
 
-        if self.init_capacity is None:
-            self.init_capacity = self.remaining_capacity.clone()
+        if self.remaining_capacity is None:
+            self.remaining_capacity = self.init_capacity.clone()
 
         if self.agent_pad_mask is None:
             self.agent_pad_mask = torch.full(

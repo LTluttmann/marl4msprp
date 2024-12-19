@@ -54,6 +54,7 @@ class BaseEnvParams:
 
     always_mask_depot: bool = False
 
+    goal: str = "min-sum"
 
     def __post_init__(self):
 
@@ -65,6 +66,11 @@ class BaseEnvParams:
             # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
             # (i.e. everything has been collected)
             self.always_mask_depot = True
+
+        if self.num_agents is None or self.num_agents == 1:
+            self.goal = "min-sum"
+        else:
+            self.goal = "min-max"
 
 
 

@@ -19,7 +19,7 @@ class MultiAgentInitEmbedding(nn.Module):
     def __init__(self, policy_params: TransformerParams):
         super(MultiAgentInitEmbedding, self).__init__()
         self.embed_dim = policy_params.embed_dim
-        self.capacity = None
+        self.scale_supply_by_demand = policy_params.scale_supply_by_demand
         self.depot_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
         self.shelf_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
         self.sku_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
@@ -44,12 +44,12 @@ class MultiAgentInitEmbedding(nn.Module):
             shelf_coordinates[..., 0],
             shelf_coordinates[..., 1],
             num_stored_skus / num_skus,
-            # mean_supply / self.capacity,
+            # mean_supply / state.capacity,
         ], dim=-1)
         return self.shelf_proj(feats)
 
     def _init_sku_embed(self, state: MSPRPState):
-        demand_scaled = state.demand.clone() / self.capacity
+        demand_scaled = state.demand.clone() / state.capacity
         num_storage_loc = state.supply.gt(0).sum(1)
 
         feats = torch.stack([
@@ -60,12 +60,17 @@ class MultiAgentInitEmbedding(nn.Module):
         return self.sku_proj(feats)
     
     def _init_edge_embed(self, state: MSPRPState):
-        supply_scaled = state.supply_w_depot.clone() / self.capacity[..., None]
+        if self.scale_supply_by_demand:
+            supply_scaled = torch.where(
+                state.demand[:, None].expand_as(state.supply_w_depot) == 0,
+                torch.zeros_like(state.supply_w_depot),  # when demand is zero, mask supply
+                torch.clamp(state.supply_w_depot.clone() / state.demand[:, None], max=1) # supply more than 100% of demand is irrelevant
+            )
+        else:
+            supply_scaled = state.supply_w_depot.clone() / state.capacity[..., None]
         return supply_scaled
     
     def forward(self, tc: MSPRPState):
-        self.capacity = tc.init_capacity.max(1, keepdims = True).values
-
         depot_emb = self._init_depot_embed(tc)
         shelf_emb = self._init_shelf_embed(tc)
         sku_emb = self._init_sku_embed(tc)

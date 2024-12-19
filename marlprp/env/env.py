@@ -211,7 +211,7 @@ class MSPRPEnv:
     
 
     def get_reward(self, state: MSPRPState, mode: str = "val"):
-        if False:
+        if self.params.goal == "min-max":
             distance = state.tour_length.max(1).values
         else:
             distance = state.tour_length.sum(1)

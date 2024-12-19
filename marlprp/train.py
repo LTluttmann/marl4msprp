@@ -1,12 +1,12 @@
 import hydra
 import logging
 import pyrootutils
+from dataclasses import asdict
 import lightning.pytorch as pl
 from omegaconf import DictConfig
-from hydra.core.hydra_config import HydraConfig
-from dataclasses import asdict
 from rl4co.utils.trainer import RL4COTrainer
 from rl4co.utils import instantiate_callbacks
+from hydra.core.hydra_config import HydraConfig
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.models.policies import RoutingPolicy
@@ -33,8 +33,6 @@ def get_trainer(
         model_params: ModelParams,
         hc: HydraConfig
     ) -> RL4COTrainer:
-
-    pl.seed_everything(train_params.seed)
     
     log.info("Instantiating callbacks...")
     callbacks = instantiate_callbacks(cfg.get("callbacks"))
@@ -76,6 +74,7 @@ def main(cfg: DictConfig):
 
     hc = HydraConfig.get()
     
+    pl.seed_everything(train_params.seed)
 
     if train_params.checkpoint is not None:
         model, model_params = LearningAlgorithm.init_from_checkpoint(

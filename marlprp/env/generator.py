@@ -98,7 +98,7 @@ class MSPRPGenerator:
                 "supply": supply,
                 "coordinates": coordinates,
                 "current_location": current_location,
-                "remaining_capacity": capacity,
+                "init_capacity": capacity,
                 "agent_pad_mask": agent_pad_mask
             }, 
             batch_size=bs
