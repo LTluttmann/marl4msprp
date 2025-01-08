@@ -13,6 +13,7 @@ from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
 from marlprp.utils.ops import gather_by_index, batchify
 from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
 
 from .base import BaseDecoder
 from .attn import AttentionPointer
@@ -35,6 +36,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
     def __init__(self, model_params):
         super().__init__(model_params)
 
+        self.dec_strategy = None
         self.shelf_decoder = MultiAgentShelfDecoder(model_params)
         self.sku_decoder = MultiAgentSkuDecoder(model_params)
 
@@ -91,34 +93,47 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         return action_logp, entropy, loss_mask
     
     def _set_decode_strategy(self, decode_type, **kwargs):
-        self.shelf_decoder._set_decode_strategy(decode_type, **kwargs)
-        self.sku_decoder._set_decode_strategy(decode_type, **kwargs)
+        self.dec_strategy = get_decoding_strategy(decode_type, **kwargs)
+        self.shelf_decoder.dec_strategy = self.dec_strategy
+        self.sku_decoder.dec_strategy = self.dec_strategy
+        # self.shelf_decoder._set_decode_strategy(decode_type, **kwargs)
+        # self.sku_decoder._set_decode_strategy(decode_type, **kwargs)
 
     def pre_decoding_hook(self, state, embeddings):
-        self.shelf_decoder.dec_strategy.setup()
-        self.sku_decoder.dec_strategy.setup()
-        if self.shelf_decoder.dec_strategy.num_starts > 1:
+        # self.shelf_decoder.dec_strategy.setup()
+        # self.sku_decoder.dec_strategy.setup()
+        # if self.shelf_decoder.dec_strategy.num_starts > 1:
+        #     state = batchify(state, self.shelf_decoder.dec_strategy.num_starts)
+        #     embeddings = batchify(embeddings, self.shelf_decoder.dec_strategy.num_starts)
+        # return state, embeddings
+        self.dec_strategy.setup()
+        if self.dec_strategy.num_starts > 1:
             state = batchify(state, self.shelf_decoder.dec_strategy.num_starts)
             embeddings = batchify(embeddings, self.shelf_decoder.dec_strategy.num_starts)
         return state, embeddings
     
     def post_decoding_hook(self, state: MSPRPState, env: MSPRPEnv):
-        shelf_logps, shelves, _ = self.shelf_decoder.post_decoding_hook(state, env)
-        sku_logps, skus, state = self.sku_decoder.post_decoding_hook(state, env)
-        logps = shelf_logps + sku_logps
-        actions = TensorDict({"shelf": shelves, "sku": skus}, batch_size=state.batch_size)
+        # shelf_logps, shelves, _ = self.shelf_decoder.post_decoding_hook(state, env)
+        # sku_logps, skus, state = self.sku_decoder.post_decoding_hook(state, env)
+        # logps = shelf_logps + sku_logps
+        # actions = TensorDict({"shelf": shelves, "sku": skus}, batch_size=state.batch_size)
+        # return logps, actions, state
+        logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
         return logps, actions, state
 
 
 
-
 class BaseMultiAgentDecoder(BaseDecoder):
-    def __init__(self, pointer, params: MahamParams) -> None:
+
+    key = ...
+
+    def __init__(self, pointer, params: MahamParams, dec_strategy) -> None:
         super().__init__(params)
         self.pointer = pointer
         self.eval_multistep = params.eval_multistep
         self.eval_per_agent = params.eval_per_agent
         self.pad = params.eval_multistep
+        self.dec_strategy = dec_strategy
 
     def forward(
         self, 
@@ -140,7 +155,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
             
             logp, step_mask = self._logits_to_logp(logits, mask)
 
-            action, logp = self.dec_strategy.step(logp, step_mask, state)
+            action, logp = self.dec_strategy.step(logp, step_mask, state, key=self.key)
             
             action = self._translate_action(action, state, env)
             actions.append(action)
@@ -219,10 +234,12 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 
-    def __init__(self, params: MahamParams) -> None:
+    key = "shelf"
+
+    def __init__(self, params: MahamParams, dec_strategy = None) -> None:
         self.embed_dim = params.embed_dim
-        pointer = AttentionPointer(params, decoder_type="shelf")
-        super().__init__(pointer=pointer, params=params)
+        pointer = AttentionPointer(params, decoder_type=self.key)
+        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
         self.use_attn_mask = params.decoder_attn_mask
 
     def _logits_to_logp(self, logits, mask):
@@ -284,11 +301,12 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
     
 
 class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
+    key = "sku"
 
-    def __init__(self, params: MahamParams) -> None:
+    def __init__(self, params: MahamParams, dec_strategy = None) -> None:
         self.embed_dim = params.embed_dim
-        pointer = AttentionPointer(params, decoder_type="sku")
-        super().__init__(pointer=pointer, params=params)
+        pointer = AttentionPointer(params, decoder_type=self.key)
+        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
         self.use_attn_mask = params.decoder_attn_mask
 
     def _logits_to_logp(self, logits, mask):

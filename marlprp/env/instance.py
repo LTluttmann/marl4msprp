@@ -70,7 +70,7 @@ class MSPRPState:
                 device=self.device
             )
         if self.zero_units_taken is None:
-            self.zero_units_taken = torch.zeros(self.batch_size, device=self.device)
+            self.zero_units_taken = torch.zeros((*self.batch_size, self.num_agents), device=self.device)
 
     @property
     def capacity(self):

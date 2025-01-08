@@ -82,7 +82,7 @@ class REINFORCE(LearningAlgorithm):
         advantage = self.scaler(reward - bl_val)
         policy_loss = -torch.mean(advantage * td_out["log_likelihood"])
         loss = policy_loss + bl_loss
-
+        self.log("train/reward", reward.mean(), on_epoch=True, prog_bar=True, sync_dist=True)
         return {
             "loss": loss,
             "reward": reward,

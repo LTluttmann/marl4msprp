@@ -19,12 +19,12 @@ def ce_loss(
     # add entropy penalty 
     loss = torch.clamp(-logp - entropy_coef * entropy, min=0)
 
-    if mask is not None:
-        loss = loss.view(bs, -1).sum(1) / denom
-    else:
-        loss = loss.view(bs, -1).mean(1)
+    # if mask is not None:
+    #     loss = loss.view(bs, -1).sum(1) / denom
+    # else:
+    #     loss = loss.view(bs, -1).mean(1)
 
-    return loss
+    return loss.sum(1)
 
 
 

@@ -115,7 +115,7 @@ class MSPRPEnv:
             taken_units = torch.min(demand_of_sku, supply_at_shelf)
             taken_units = torch.min(taken_units, remaining_capacity)
 
-        state.zero_units_taken[pick_instance] += taken_units.eq(0).int()
+        state.zero_units_taken[pick_instance, agent] = taken_units.eq(0).float()
 
         state.supply[pick_instance, shelf_idx, chosen_sku] -= taken_units
         state.remaining_capacity[pick_instance, agent] -= taken_units   
@@ -162,6 +162,12 @@ class MSPRPEnv:
 
 
     def get_sku_mask(self, state: MSPRPState, chosen_nodes: TensorDict = None):
+        if chosen_nodes is None:
+            return state.demand.eq(0)
+        else:
+            return self.get_sku_mask_at_node(state, chosen_nodes)
+
+    def get_sku_mask_at_node(self, state: MSPRPState, chosen_nodes: TensorDict = None):
         """
         Gets a (batch_size, n_items+1) mask with the feasible actions depending on item supply at visited 
         shelf and item demand. 0 = feasible, 1 = infeasible
@@ -173,11 +179,12 @@ class MSPRPEnv:
         # [BS]
         # lets assume that, after selecting a shelf, we first update the state and then
         # select an item. This is much cleaner i think
-        nodes = state.current_location.split(1, dim=1)
+        if chosen_nodes is None:
+            chosen_nodes = state.current_location.split(1, dim=1)
         # agents = chosen_nodes["agent"]
         # assert torch.allclose(torch.arange(agents.size(1)).view(1, -1).expand_as(agents), agents)
         sku_masks = []
-        for node in nodes:
+        for node in chosen_nodes:
 
             node = node.squeeze(1)
             depot = node.lt(state.num_depots) # [BS]
@@ -222,6 +229,6 @@ class MSPRPEnv:
 
         reward = distance + self.params.packing_ratio_penalty * entropy
 
-        if mode == "train":
-            reward = reward + self.params.zero_picks_penalty + state.zero_units_taken
+        # if mode == "train":
+        #     reward = reward + self.params.zero_picks_penalty + state.zero_units_taken
         return -reward

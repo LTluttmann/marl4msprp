@@ -40,14 +40,16 @@ class AgentContext(nn.Module):
 
     def __init__(self, params: MahamParams):
         super().__init__()
-        self.proj_agent_state = nn.Linear(1, params.embed_dim, bias=False)
+        self.proj_agent_state = nn.Linear(2, params.embed_dim, bias=True)
         self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=False)
         if params.use_communication and (params.env.num_agents is None or params.env.num_agents > 1):
             self.comm_layer = CommunicationLayer(params)
 
     def agent_state_emb(self, state: MSPRPState):
         feats = torch.stack([
-            state.remaining_capacity / state.capacity
+            state.remaining_capacity / state.capacity,
+            (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
+            # state.demand.sum(1, keepdims=True) / (state.remaining_capacity + 1e-7)
         ], dim=-1)
         state_emb = self.proj_agent_state(feats)
         return state_emb

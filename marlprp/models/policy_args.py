@@ -26,6 +26,7 @@ class MatNetParams(TransformerParams):
     ms_hidden_dim: int = None
     mask_no_edge: bool = False
     decoder_attn_mask: bool = False
+    ms_split_heads: bool = True
 
     def __post_init__(self):
         super().__post_init__()

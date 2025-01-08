@@ -45,12 +45,14 @@ class MixedScoreFF(nn.Module):
         super().__init__()
         num_heads = params.num_heads
         ms_hidden_dim = params.ms_hidden_dim
+        ms_output_dim = num_heads if not params.ms_split_heads else 2 * num_heads
+        self.split_heads = params.ms_split_heads
         # in initialization, account for the fact that we basically only have two input features
         mix1_init = math.sqrt(1/2)
         mix2_init = math.sqrt(1/ms_hidden_dim)
 
         self.lin1 = nn.Linear(2 * num_heads, num_heads * ms_hidden_dim, bias=False)
-        self.lin2 = nn.Linear(num_heads * ms_hidden_dim, num_heads, bias=False)
+        self.lin2 = nn.Linear(num_heads * ms_hidden_dim, ms_output_dim, bias=False)
 
         self.activation = _get_activation_fn(params.activation)
         nn.init.uniform_(self.lin1.weight, a=-mix1_init, b=mix1_init)
@@ -63,14 +65,16 @@ class MixedScoreFF(nn.Module):
         two_scores = torch.stack((dot_product_score, cost_mat_score), dim=-1)
         two_scores = rearrange(two_scores, "b h r c s -> b r c (h s)")
         # shape: (batch, row_cnt, col_cnt, 2 * num_heads)
-        ms1 = self.lin1(two_scores)
-        ms1_activated = self.activation(ms1)
-        # shape: (batch, row_cnt, col_cnt, num_heads)
-        ms2 = self.lin2(ms1_activated)
-        # shape: (batch, row_cnt, head_num, col_cnt)
-        mixed_scores = rearrange(ms2, "b r c h -> b h r c")
-
-        return mixed_scores
+        ms = self.lin2(self.activation(self.lin1(two_scores)))
+        if self.split_heads:
+            # shape: (batch, row_cnt, head_num, col_cnt)
+            mixed_scores = rearrange(ms, "b r c (h two) -> b h r c two", two=2)
+            ms1, ms2 = mixed_scores.chunk(2, dim=-1)
+            ms1, ms2 = ms1.squeeze(-1), ms2.squeeze(-1).transpose(-2, -1)
+        else:
+            mixed_scores = rearrange(ms, "b r c h -> b h r c")
+            ms1, ms2 = mixed_scores, mixed_scores.transpose(-2, -1)
+        return ms1, ms2
 
 
 class EfficientMixedScoreMultiHeadAttention(nn.Module):
@@ -116,16 +120,16 @@ class EfficientMixedScoreMultiHeadAttention(nn.Module):
         if cost_mat is not None:
             # shape: (batch, num_heads, row_cnt, col_cnt)
             cost_mat_score = cost_mat[:, None, :, :].expand_as(dot)
-            dot = self.mixed_scores_layer(dot, cost_mat_score)
+            ms1, ms2 = self.mixed_scores_layer(dot, cost_mat_score)
 
         if attn_mask is not None:
-            mask1 = ~attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(dot)
-            mask2 = mask1.clone().transpose(-2, -1)
+            mask1 = ~attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(ms1)
+            mask2 = mask1.transpose(-2, -1)
         else:
             mask1, mask2 = None, None
 
-        h1 = self.out_proj1(apply_weights_and_combine(dot, v2, mask=mask1))
-        h2 = self.out_proj2(apply_weights_and_combine(dot.transpose(-2, -1), v1, mask=mask2))
+        h1 = self.out_proj1(apply_weights_and_combine(ms1, v2, mask=mask1))
+        h2 = self.out_proj2(apply_weights_and_combine(ms2, v1, mask=mask2))
 
         return h1, h2
     

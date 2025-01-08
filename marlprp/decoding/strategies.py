@@ -40,7 +40,7 @@ class DecodingStrategy:
             num_decoding_samples: float = None,
             only_store_selected_logp: bool = True, 
             select_best: bool = True,
-            store: bool = False,
+            store: bool = True,
         ) -> None:
         # init buffers
         self.top_p = top_p
@@ -108,7 +108,11 @@ class DecodingStrategy:
             logp_selected = logp_selected.sum(-1)
         else:
             logp_selected = torch.stack(list(map(lambda x: torch.stack(x, dim=-1), self.logp.values())), -1).sum(-1)
-            all_actions = torch.stack(list(map(lambda x: torch.stack(x, dim=-1), self.actions.values())), -1)
+            all_actions = TensorDict(
+                {k: torch.stack(v, dim=-1) for k,v in self.actions.items()}, 
+                batch_size=logp_selected.size(0), 
+                device=logp_selected.device
+            )
         
         if self.num_starts > 1 and self.select_best:
             logp_selected, all_actions, state = self._select_best_start(logp_selected, all_actions, state, env)

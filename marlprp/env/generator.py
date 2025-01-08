@@ -92,6 +92,7 @@ class MSPRPGenerator:
             agent_pad_mask = torch.full((*bs, num_agents), fill_value=False)
         current_location = torch.randint(0, self.num_depots, size=(*bs, num_agents))
         capacity = torch.full((*bs, num_agents), fill_value=self.capacity, dtype=torch.float32)
+        capacity.masked_fill_(agent_pad_mask, 0)
         return TensorDict(
             {
                 "demand": demand,

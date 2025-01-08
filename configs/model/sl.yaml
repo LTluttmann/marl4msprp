@@ -17,6 +17,10 @@ model:
   update_after_every_batch: true
 
 
+train:
+  batch_size: 1000
+  dataset_size: 4000
+
 callbacks:
 
   lr_warmup_callback:

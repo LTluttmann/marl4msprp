@@ -28,8 +28,8 @@ def get_dynamic_emb(params: MahamParams, key: str = None):
     
     emb_registry = {
         "maham": {
-            "shelf": ...,
-            "sku": ...
+            "shelf": ShelfDynEmb,
+            "sku": SkuDynEmb
         }
     }
 
@@ -46,7 +46,7 @@ class ShelfKVL(nn.Module):
 
     def __init__(self,params: MahamParams):
         super().__init__()
-        self.dynamic_embedding = get_dynamic_emb(params)
+        self.dynamic_embedding = get_dynamic_emb(params, key="shelf")
         self.Wkvl = nn.Linear(params.embed_dim, 3 * params.embed_dim, bias=False)
         self.cache = None
 
@@ -75,7 +75,7 @@ class SkuKVL(nn.Module):
 
     def __init__(self,params: MahamParams):
         super().__init__()
-        self.dynamic_embedding = get_dynamic_emb(params)
+        self.dynamic_embedding = get_dynamic_emb(params, key="sku")
         self.Wkvl = nn.Linear(params.embed_dim, 3 * params.embed_dim, bias=False)
         self.dummy = nn.Parameter(torch.zeros(1, 1, params.embed_dim), requires_grad=False)
         self.cache = None
@@ -120,7 +120,28 @@ class StaticEmbedding(nn.Module):
 class ShelfDynEmb(nn.Module):
     def __init__(self, params: MahamParams) -> None:
         super().__init__()
-        self.project_node_step = nn.Linear(1, 3 * params.embed_dim, bias=False)
+        self.project_edge_step = nn.Linear(params.embed_dim,  3 * params.embed_dim, bias=False)
 
     def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
-        raise NotImplementedError
+        bs, n_nodes, emb_dim = emb["shelf"].shape
+        # (bs, nodes, sku)
+        supply_scaled = state.supply_w_depot / state.capacity
+        edge_feature = torch.einsum('ijk,ikm->ijm', supply_scaled, emb["sku"]).view(bs, n_nodes, emb_dim)
+        edge_update = self.project_edge_step(edge_feature)
+        return edge_update.chunk(3, dim=-1)
+    
+
+class SkuDynEmb(nn.Module):
+    def __init__(self, params: MahamParams) -> None:
+        super().__init__()
+        self.project_sku_step = nn.Linear(1, 3 * params.embed_dim, bias=False)
+        self.project_edge_step = nn.Linear(params.embed_dim,  3 * params.embed_dim, bias=False)
+
+    def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
+        bs, n_sku, emb_dim = emb["sku"].shape
+        sku_update = self.project_sku_step(state.demand.unsqueeze(-1) / state.capacity)
+        # (bs, sku, nodes)
+        supply_scaled = state.supply_w_depot.transpose(-2,-1) / state.capacity
+        edge_feature = torch.einsum('ijk,ikm->ijm', supply_scaled, emb["shelf"]).view(bs, n_sku, emb_dim)
+        edge_update = self.project_edge_step(edge_feature)
+        return (edge_update + sku_update).chunk(3, dim=-1)
