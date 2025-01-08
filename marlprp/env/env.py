@@ -180,7 +180,8 @@ class MSPRPEnv:
         # lets assume that, after selecting a shelf, we first update the state and then
         # select an item. This is much cleaner i think
         if chosen_nodes is None:
-            chosen_nodes = state.current_location.split(1, dim=1)
+            chosen_nodes = state.current_location
+        chosen_nodes = chosen_nodes.split(1, dim=1)
         # agents = chosen_nodes["agent"]
         # assert torch.allclose(torch.arange(agents.size(1)).view(1, -1).expand_as(agents), agents)
         sku_masks = []

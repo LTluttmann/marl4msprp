@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from einops import reduce, rearrange
 from tensordict import TensorDict, pad
-from typing import TypedDict, Tuple
+from typing import TypedDict, Tuple, List
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.env.instance import MSPRPState
@@ -47,10 +47,27 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         # partial step through the environment to get intermediate state s'
         intermediate_state = env.step(next_shelves, state)
         # get new action mask from intermediate state
-        sku_mask = env.get_sku_mask(intermediate_state, next_shelves)
+        sku_mask = env.get_sku_mask(intermediate_state, next_shelves["shelf"])
         skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, sku_mask, env)
 
+        # handle conflicts
+        conflicts = torch.logical_and(skus_to_pick["sku"] == 0, ~intermediate_state.agent_at_depot())
+        current_nodes = state.current_location[conflicts]
+        current_agent = conflicts.nonzero()[:, 1]
+        current_idx = current_nodes * state.num_agents + current_agent
+        current_action = TensorDict(
+            {
+                "idx": current_idx, 
+                "agent": current_agent, 
+                "shelf": current_nodes,
+            },
+            batch_size=current_nodes.shape
+        )
+        next_shelves[conflicts] = current_action
+        shelf_logps[conflicts] = 0
+
         # step through environment to get next state
+        intermediate_state = env.step(next_shelves, state)
         next_state = env.step(skus_to_pick, intermediate_state)
         # save actions as tensordict
         actions = TensorDict({"shelf": next_shelves, "sku": skus_to_pick}, batch_size=next_shelves.batch_size)
@@ -82,7 +99,9 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
 
         sku_action = actions["sku"]
         sku_mask = masks["sku"]
-
+        # unmask the "stay" action, where the agent simply stays at current node. This is 
+        # selected in case of conflicts
+        sku_mask[..., 0] = False
         sku_logp, sku_entropy = self.sku_decoder.get_logp_of_action(
             embeddings, action=sku_action, mask=sku_mask, state=state
         )
@@ -162,7 +181,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
             logps.append(logp)
             busy_agents.append(action["agent"])
 
-            mask = self._update_mask(mask, action, state, busy_agents)
+            mask = self._update_mask(mask, actions, state, busy_agents)
 
         # maybe pad to ensure all action buffers to have the same size
         n_active_agents = len(actions)
@@ -193,7 +212,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 
     @abc.abstractmethod
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state: MSPRPState, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list) -> Tensor:
         pass
 
 
@@ -273,7 +292,9 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         )
         return action
     
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state, busy_agents: list) -> Tensor:
+        action = actions[-1]
+
         bs, num_agents, num_nodes = mask.shape
         updated_mask = mask.clone()
         selected_shelf = action["shelf"]
@@ -339,13 +360,14 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         )
         return action
     
-    def _update_mask(self, mask: Tensor, action: MultiAgentAction, state: MSPRPState, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list) -> Tensor:
         bs, n_agents, n_jobs = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
         # NOTE below code doesnt help, since state.demand is not updated between agent updates
-        # chosen_sku = action["sku"]
-        # curr_agent = action["agent"]
+        action = actions[-1]
+        chosen_sku = action["sku"]
+        curr_agent = action["agent"]
 
         # pick_instance = chosen_sku != 0
         # full_demand_taken = torch.full_like(pick_instance, fill_value=False)
@@ -372,8 +394,8 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         #     True
         # )
         # mask[..., 0] = torch.where(mask.all(-1), False, mask[...,0])
-        # mask = mask.scatter(-1, selected_job.view(bs, 1, 1).expand(-1, num_mas, 1), True)
-        # mask[..., 0] = False
+        mask = mask.scatter(-1, chosen_sku.view(bs, 1, 1).expand(-1, n_agents, 1), True)
+        mask[..., 0] = torch.where(mask[...,1:].all(-1), False, mask[...,0])
         mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, n_jobs), True)
 
         return mask
