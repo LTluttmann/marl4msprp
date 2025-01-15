@@ -68,7 +68,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
 
             logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
 
-            loss = self.loss_fn(logp, entropy, mask=mask, entropy_coef=self.entropy_coef)
+            loss = self.loss_fn(logp, entropy, mask=mask, entropy_coef=self.entropy_coef, precedence=sub_td["action"]["sku"]["precedence"])
 
             if self.model_params.priority_key is not None:
                 sub_td.set(self.model_params.priority_key, loss.detach().clone())
@@ -113,11 +113,14 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
 
                 if not self.model_params.eval_multistep and td["action"].dim() == 2:
                     action = td["action"].clone()
+                    pad_mask = td["state"].agent_pad_mask.clone()
                     aug_bs, n_actions = action.shape
                     td = td.unsqueeze(1).expand(aug_bs, n_actions)
-                    td["action"] = action
+                    td["action"] = action.unsqueeze(-1)
+                    td["mask"] = torch.logical_or(td["state"].done, pad_mask)
                     steps += n_actions
                 else:
+                    td["mask"] = td["state"].done.clone()
                     td = td.unsqueeze(1)
                     steps += 1
 
@@ -148,7 +151,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             # flatten so that every step is an experience
             best_states = best_states.flatten()
             # filter out steps where the instance is already in terminal state. There is nothing to learn from
-            best_states = best_states[~best_states["state"].done]
+            best_states = best_states[~best_states["mask"]]
             # save to memory
             self.rb.extend(best_states)
             # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)

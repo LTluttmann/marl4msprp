@@ -54,7 +54,7 @@ class BaseEnvParams:
 
     always_mask_depot: bool = False
 
-    goal: str = "min-sum"
+    goal: str = None
 
     def __post_init__(self):
 
@@ -67,10 +67,11 @@ class BaseEnvParams:
             # (i.e. everything has been collected)
             self.always_mask_depot = True
 
-        if self.num_agents is None or self.num_agents == 1:
-            self.goal = "min-sum"
-        else:
-            self.goal = "min-max"
+        if self.goal is None:
+            if self.num_agents is None or self.num_agents == 1:
+                self.goal = "min-sum"
+            else:
+                self.goal = "min-max"
 
 
 
@@ -114,7 +115,6 @@ class LargeEnvParams(BaseEnvParams):
     num_total_skus: Union[List, int] = 200
     max_sku_per_shelf: int = 20
     min_sku_per_shelf: int = 1
-
 
 
 
@@ -307,7 +307,6 @@ class ValidationParams:
             "top_p": self.top_p,
             "temperature": self.temperature,
             "num_decoding_samples": self.num_decoding_samples,
-            "store": True
         }
 
 @dataclass
@@ -329,6 +328,8 @@ class TestParams:
     checkpoint: str = None
     seed: int = 1234567
 
+    gurobi_timeout: int = 3600
+
     @property
     def decoding(self) -> dict:
         return {
@@ -337,5 +338,4 @@ class TestParams:
             "top_p": self.top_p,
             "temperature": self.temperature,
             "num_decoding_samples": self.num_decoding_samples,
-            "store": True
         }

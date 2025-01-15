@@ -62,6 +62,7 @@ def listnet_loss(
         mask: torch.Tensor = None, 
         entropy_coef: float = 0,
         alpha: float = 0.0,
+        precedence: torch.Tensor = None,
         **kwargs
     ):
     """ListNet inspired loss. This loss assumes that the logps are ordered corresponding to the
@@ -74,8 +75,9 @@ def listnet_loss(
     logp = logp.view(bs, -1)
     
     y_true = torch.ones_like(logp)
-    ranks = torch.arange(1, N+1, device=logp.device).view(1, N).expand_as(logp)
-    weights = torch.exp(-(alpha * (ranks - 1)))
+    if precedence is None:
+        precedence = torch.arange(0, N, device=logp.device).view(1, N).expand_as(logp)
+    weights = torch.exp(-(alpha * precedence))
     if mask is not None:
         # TODO is this sufficient?
         weights[mask] = 0

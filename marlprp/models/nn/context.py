@@ -13,8 +13,16 @@ def get_context_emb(params: PolicyParams, key: str = None):
 
     emb_registry = {
         "maham": {
-            "shelf": AgentContext,
-            "sku": AgentContext
+            "shelf": MultiAgentContext,
+            "sku": MultiAgentContext
+        },
+        "ham": {
+            "shelf": MultiAgentContext,
+            "sku": MultiAgentContext
+        },
+        "et": {
+            "shelf": EquityTransformerContext,
+            "sku": EquityTransformerContext
         }
     }
 
@@ -36,20 +44,22 @@ class Context(nn.Module):
         pass
 
 
-class AgentContext(nn.Module):
+class MultiAgentContext(nn.Module):
 
     def __init__(self, params: MahamParams):
         super().__init__()
-        self.proj_agent_state = nn.Linear(2, params.embed_dim, bias=True)
-        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=False)
+        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
+        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_communication and (params.env.num_agents is None or params.env.num_agents > 1):
             self.comm_layer = CommunicationLayer(params)
 
     def agent_state_emb(self, state: MSPRPState):
+
         feats = torch.stack([
             state.remaining_capacity / state.capacity,
             (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
-            # state.demand.sum(1, keepdims=True) / (state.remaining_capacity + 1e-7)
+            #state.demand.sum(1, keepdims=True) / (state.remaining_capacity + 1e-7),
+            state.tour_length - state.tour_length.max(1, keepdim=True).values
         ], dim=-1)
         state_emb = self.proj_agent_state(feats)
         return state_emb
@@ -69,6 +79,67 @@ class AgentContext(nn.Module):
         return agent_emb
 
 
+class AgentContext(nn.Module):
+
+    def __init__(self, params: MahamParams):
+        super().__init__()
+        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
+        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
+
+    def agent_state_emb(self, state: MSPRPState):
+
+        feats = torch.stack([
+            state.remaining_capacity / state.capacity,
+            (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
+        ], dim=-1)
+        state_emb = self.proj_agent_state(feats)
+        return state_emb
+
+    def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
+        shelf_emb = emb["shelf"]
+        current_locs = state.current_location
+        # get embedding of current location of agents
+        current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
+        # get embedding for agent state
+        state_emb = self.agent_state_emb(state)
+        # cat and project
+        agent_emb = torch.cat((current_loc_emb, state_emb), dim=-1)
+        agent_emb = self.proj_agent(agent_emb)
+        return agent_emb
+
+
+class EquityTransformerContext:
+
+    def __init__(self, params: MahamParams):
+        super().__init__()
+        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
+        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
+
+    def agent_state_emb(self, state: MSPRPState):
+
+        feats = torch.stack([
+            state.remaining_capacity / state.capacity,
+            (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
+            #state.demand.sum(1, keepdims=True) / (state.remaining_capacity + 1e-7),
+            state.tour_length
+        ], dim=-1)
+        state_emb = self.proj_agent_state(feats)
+        return state_emb
+
+    def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
+        shelf_emb = emb["shelf"]
+        current_locs = state.current_location
+        # get embedding of current location of agents
+        current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
+        # get embedding for agent state
+        state_emb = self.agent_state_emb(state)
+        # cat and project
+        agent_emb = torch.cat((current_loc_emb, state_emb), dim=-1)
+        agent_emb = self.proj_agent(agent_emb)
+        return agent_emb
+    
+
+
 class CommunicationLayer(nn.Module):
     def __init__(self, params: TransformerParams) -> None:
         super().__init__()
@@ -78,8 +149,9 @@ class CommunicationLayer(nn.Module):
             dim_feedforward=params.feed_forward_hidden,
             dropout=params.dropout,
             activation=params.activation,
-            norm_first=params.norm_first,
+            norm_first=True,
             batch_first=True,
+            bias=params.bias
         )
 
     def forward(self, x):

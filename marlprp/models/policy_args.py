@@ -13,6 +13,7 @@ class TransformerParams(PolicyParams):
     activation: str = "gelu"
     norm_first: bool = False # True
     scale_supply_by_demand: bool = True
+    bias: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -22,7 +23,7 @@ class TransformerParams(PolicyParams):
 
 @dataclass(kw_only=True)
 class MatNetParams(TransformerParams):
-    policy: str = "matnet"
+    policy: str = "ham"
     ms_hidden_dim: int = None
     mask_no_edge: bool = False
     decoder_attn_mask: bool = False
@@ -31,6 +32,8 @@ class MatNetParams(TransformerParams):
     def __post_init__(self):
         super().__post_init__()
         self.ms_hidden_dim = self.ms_hidden_dim or self.qkv_dim
+
+
 
 
 @dataclass(kw_only=True)

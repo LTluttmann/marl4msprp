@@ -11,17 +11,17 @@ from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
 class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
     def __init__(self, model_params: ModelParams) -> None:
         super().__init__() 
-        self.dec_strategy: DecodingStrategy = None
         self.stepwise_encoding = model_params.stepwise_encoding
+        self.dec_strategy: DecodingStrategy = None
 
-    def pre_decoding_hook(self, state: MSPRPState, embeddings: TensorDict):
+    def pre_forward_hook(self, state: MSPRPState, embeddings: TensorDict):
         self.dec_strategy.setup()
         if self.dec_strategy.num_starts > 1:
             state = batchify(state, self.dec_strategy.num_starts)
             embeddings = batchify(embeddings, self.dec_strategy.num_starts)
         return state, embeddings
 
-    def post_decoding_hook(self, state: MSPRPState, env: MSPRPEnv):
+    def post_forward_hook(self, state: MSPRPState, env: MSPRPEnv):
         logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
         return logps, actions, state
 

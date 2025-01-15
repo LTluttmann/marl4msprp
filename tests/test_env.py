@@ -6,8 +6,7 @@ from tensordict import TensorDict
 from einops import rearrange
 from marlprp.env.env import MSPRPEnv
 from marlprp.utils.config import EnvParams
-from marlprp.utils.dataset import EnvLoader
-
+from marlprp.utils.dataset import EnvLoader, read_luttmann
 # @pytest.mark.parametrize("num_agents", [2])
 # def test_env(num_agents):
 
@@ -87,7 +86,7 @@ def test_w_lt_instances(instance_path):
         env, 
         batch_size=1, 
         path=solution_path,
-        read_fn=lambda x: torch.load(x)
+        read_fn=read_luttmann
     )
     for td in dl:
         sol = td.pop("solution")[0]
@@ -106,4 +105,4 @@ def test_w_lt_instances(instance_path):
             }, batch_size=[1, 1])
             state = env.step(action, state)
             i += 1
-        assert torch.isclose(sol["length"], state.tour_length).item(), f"{sol['length']} vs {state.tour_length}"
+        assert torch.isclose(sol["length"], state.tour_length[0,0]).item(), f"{sol['length']} vs {state.tour_length[0,0]}"

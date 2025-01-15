@@ -39,3 +39,4 @@ test:
   batch_size: 50
   num_decoding_samples: 200
   decode_type: sampling
+  gurobi_timeout: 3600

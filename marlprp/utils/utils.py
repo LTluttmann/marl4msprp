@@ -216,7 +216,7 @@ def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig
     policy_params = model_params.policy
     env_params = policy_params.env
     default_tags = [
-        model_params.algorithm, 
+        model_params.algorithm,
         policy_params.policy, 
         env_params.name,
         f"{env_params.num_shelves}j",
@@ -230,6 +230,6 @@ def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig
     return WandbLogger(
         save_dir=hc.runtime.output_dir,
         tags=all_tags,
-        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}s-{env_params.num_skus}i",
+        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}s-{env_params.num_skus}i-{env_params.num_agents}a",
         **logger_cfg
     )

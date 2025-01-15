@@ -28,7 +28,6 @@ def get_decoding_strategy(decoding_strategy, **config):
     return strategy_registry.get(decoding_strategy, Sampling)(**config)
 
 
-
 class DecodingStrategy:
     name = ...
 
@@ -40,7 +39,6 @@ class DecodingStrategy:
             num_decoding_samples: float = None,
             only_store_selected_logp: bool = True, 
             select_best: bool = True,
-            store: bool = True,
         ) -> None:
         # init buffers
         self.top_p = top_p
@@ -52,7 +50,6 @@ class DecodingStrategy:
         self.tanh_clipping = tanh_clipping
         self.num_starts = num_decoding_samples or 0
         self.only_store_selected_logp = only_store_selected_logp
-        self.store = store
 
     def _step(self, logp: torch.Tensor, td: TensorDict, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("Must be implemented by subclass")
@@ -82,8 +79,6 @@ class DecodingStrategy:
         """called by models, that encode only once and then use the generated embeddings to encode
         a complete solution"""
         ...
-    
-
 
     def post_decoder_hook(self, state: MSPRPState, env: MSPRPEnv):
         """called by all models after a full solution is obtained"""
@@ -134,9 +129,8 @@ class DecodingStrategy:
         if self.only_store_selected_logp:
             logp = logp.gather(-1, selected_actions.unsqueeze(-1)).squeeze(-1)
 
-        if self.store:
-            self.actions[key].append(selected_actions)
-            self.logp[key].append(logp)
+        self.actions[key].append(selected_actions)
+        self.logp[key].append(logp)
 
         return selected_actions, logp
 

@@ -63,13 +63,11 @@ class InstanceFilesDataset(Dataset):
 
     def __init__(
             self, 
-            env: MSPRPEnv, 
             path: str, 
             read_fn: callable,
         ) -> None:
 
         super().__init__()
-        self.env = env
         self.instances = read_fn(path)
         self.num_samples = len(self.instances)
 
@@ -88,8 +86,8 @@ class InstanceFilesDataset(Dataset):
 class EnvLoader(DataLoader):
     def __init__(
         self, 
-        env: MSPRPEnv, 
-        batch_size: int,
+        env: MSPRPEnv = None, 
+        batch_size: int = 1,
         dataset_size: int = None,
         path: str = None,
         shuffle: bool = False,
@@ -100,16 +98,17 @@ class EnvLoader(DataLoader):
     ) -> None:
 
         if path is not None:
-            dataset = InstanceFilesDataset(env, path, **kwargs)
+            dataset = InstanceFilesDataset(path, **kwargs)
             super().__init__(
                 dataset=dataset, 
                 batch_size=batch_size, 
                 sampler=sampler, 
                 collate_fn=dataset.collate_fn,
-                shuffle=shuffle,
+                shuffle=False,
             )
 
         elif reload_every_n >= 1:
+            assert env is not None
             dataset = DistributableSynetheticDataset(
                 env=env,
                 num_samples=dataset_size,
@@ -124,6 +123,7 @@ class EnvLoader(DataLoader):
             )
 
         else:
+            assert env is not None
             dataset = SynetheticDataset(
                 env=env,
                 batch_size=batch_size, 
@@ -163,10 +163,19 @@ def get_file_dataloader(env, batch_size: int, file_dir: str = None):
 
 def read_luttmann(path):
     td = torch.load(path)
+    bs = td.batch_size
     # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)
-    # num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["remaining_capacity"])
-    # max_num_agents = int(num_agents.max().item())
-    # agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*td.batch_size, max_num_agents)
-    # td.set("agent_pad_mask", agent_pad_mask)
+    num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["init_capacity"])
+    max_num_agents = int(num_agents.max().item())
+    agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*bs, max_num_agents)
+    num_agents = max_num_agents
+    current_location = td["current_location"].repeat(1, num_agents)
+    capacity = td["init_capacity"].repeat(1, num_agents)
+
+    td.update({
+        "init_capacity": capacity,
+        "current_location": current_location,
+        "agent_pad_mask": agent_pad_mask
+    })
     return td
     

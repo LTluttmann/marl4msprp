@@ -66,7 +66,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         next_shelves[conflicts] = current_action
         shelf_logps[conflicts] = 0
 
-        # step through environment to get next state
+        # step through environment with handled conflicts to get next state
         intermediate_state = env.step(next_shelves, state)
         next_state = env.step(skus_to_pick, intermediate_state)
         # save actions as tensordict
@@ -84,6 +84,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         state = state.clone()
         masks = masks.clone()
         actions = actions.clone()
+        assert (actions["shelf"]["agent"] == actions["sku"]["agent"]).all()
 
         shelf_action = actions["shelf"]
         shelf_mask = masks["shelf"]
@@ -95,7 +96,9 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
             embeddings, action=shelf_action, mask=shelf_mask, state=state
         )
         # update state
-        state.current_location = shelf_action["shelf"]
+        state.current_location = state.current_location.scatter(
+            1, shelf_action["agent"], shelf_action["shelf"]
+        )
 
         sku_action = actions["sku"]
         sku_mask = masks["sku"]
@@ -108,37 +111,13 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
 
         action_logp = shelf_logp + sku_logp
         entropy = shelf_entropy + sku_entropy
-        loss_mask = state.agent_pad_mask
+        loss_mask = state.agent_pad_mask.gather(1, actions["shelf"]["agent"])
         return action_logp, entropy, loss_mask
     
     def _set_decode_strategy(self, decode_type, **kwargs):
         self.dec_strategy = get_decoding_strategy(decode_type, **kwargs)
         self.shelf_decoder.dec_strategy = self.dec_strategy
         self.sku_decoder.dec_strategy = self.dec_strategy
-        # self.shelf_decoder._set_decode_strategy(decode_type, **kwargs)
-        # self.sku_decoder._set_decode_strategy(decode_type, **kwargs)
-
-    def pre_decoding_hook(self, state, embeddings):
-        # self.shelf_decoder.dec_strategy.setup()
-        # self.sku_decoder.dec_strategy.setup()
-        # if self.shelf_decoder.dec_strategy.num_starts > 1:
-        #     state = batchify(state, self.shelf_decoder.dec_strategy.num_starts)
-        #     embeddings = batchify(embeddings, self.shelf_decoder.dec_strategy.num_starts)
-        # return state, embeddings
-        self.dec_strategy.setup()
-        if self.dec_strategy.num_starts > 1:
-            state = batchify(state, self.shelf_decoder.dec_strategy.num_starts)
-            embeddings = batchify(embeddings, self.shelf_decoder.dec_strategy.num_starts)
-        return state, embeddings
-    
-    def post_decoding_hook(self, state: MSPRPState, env: MSPRPEnv):
-        # shelf_logps, shelves, _ = self.shelf_decoder.post_decoding_hook(state, env)
-        # sku_logps, skus, state = self.sku_decoder.post_decoding_hook(state, env)
-        # logps = shelf_logps + sku_logps
-        # actions = TensorDict({"shelf": shelves, "sku": skus}, batch_size=state.batch_size)
-        # return logps, actions, state
-        logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
-        return logps, actions, state
 
 
 
@@ -193,8 +172,10 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
         actions = torch.stack(actions, dim=1)
         # NOTE we sort actions in ascending order of agent idx
-        agent_sort_idx = torch.argsort(actions["agent"])
+        precedence = actions["agent"]
+        agent_sort_idx = torch.argsort(precedence)
         actions = actions.gather(1, agent_sort_idx)
+        actions["precedence"] = precedence
         actions = pad(actions, pad_size, value=0)
         # NOTE we sort logps in ascending order of agent idx
         logps = torch.stack(logps, dim=1)
@@ -327,8 +308,8 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
     def __init__(self, params: MahamParams, dec_strategy = None) -> None:
         self.embed_dim = params.embed_dim
         pointer = AttentionPointer(params, decoder_type=self.key)
-        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
         self.use_attn_mask = params.decoder_attn_mask
+        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
 
     def _logits_to_logp(self, logits, mask):
         if torch.is_grad_enabled() and self.eval_per_agent:
@@ -347,14 +328,22 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         return logp, mask
 
     def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
+        batch_idx = torch.arange(action_idx.size(0), device=action_idx.device)
         # translate and store action
         selected_agent = action_idx % state.num_agents
         selected_sku = action_idx // state.num_agents
+
+        loc_of_agent = gather_by_index(state.current_location, selected_agent)
+        supply = state.supply_w_depot_and_dummy[batch_idx, loc_of_agent, selected_sku]
+        capacity = gather_by_index(state.remaining_capacity, selected_agent)
+        max_units = torch.minimum(supply, capacity)
+
         action = TensorDict(
             {
                 "idx": action_idx, 
                 "agent": selected_agent, 
                 "sku": selected_sku,
+                "max_units": max_units,
             },
             batch_size=state.batch_size
         )
@@ -364,42 +353,26 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         bs, n_agents, n_jobs = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
-        # NOTE below code doesnt help, since state.demand is not updated between agent updates
+
         action = actions[-1]
         chosen_sku = action["sku"]
-        curr_agent = action["agent"]
 
-        # pick_instance = chosen_sku != 0
-        # full_demand_taken = torch.full_like(pick_instance, fill_value=False)
-        # # subtract 1 for dummy item
-        # sku = chosen_sku[pick_instance] - 1
-        # agent = curr_agent[pick_instance]
-        # remaining_capacity = state.remaining_capacity[pick_instance, agent]
+        max_units_taken = torch.zeros_like(state.demand_w_dummy)
+        for action in actions:
+            max_units_taken.scatter_add_(1, index=action["sku"][:, None], src=action["max_units"][:, None])
 
-        # # [BS, 1]
-        # chosen_shelf = state.current_location.gather(1, curr_agent[:, None]).squeeze(1)
-        # shelf_idx = chosen_shelf[pick_instance] - state.num_depots
+        a = gather_by_index(max_units_taken, chosen_sku, dim=1)
+        b = gather_by_index(state.demand_w_dummy, chosen_sku, dim=1)
 
-        # # [num_visited]
-        # demand_of_sku = state.demand[pick_instance, sku]
-        # supply_at_shelf = state.supply[pick_instance, shelf_idx, sku]
-
-        # taken_units = torch.min(demand_of_sku, supply_at_shelf)
-        # taken_units = torch.min(taken_units, remaining_capacity)
-
-        # full_demand_taken[pick_instance] = taken_units == demand_of_sku
-        # mask[full_demand_taken].scatter(
-        #     2, 
-        #     chosen_sku[full_demand_taken].view(-1,1,1).expand(-1,n_agents,n_jobs), 
-        #     True
-        # )
-        # mask[..., 0] = torch.where(mask.all(-1), False, mask[...,0])
-        mask = mask.scatter(-1, chosen_sku.view(bs, 1, 1).expand(-1, n_agents, 1), True)
+        mask = torch.where(
+            a.ge(b).view(bs, 1, 1).expand_as(mask), 
+            mask.scatter(-1, chosen_sku.view(bs, 1, 1).expand(-1, n_agents, 1), True), 
+            mask
+        )
         mask[..., 0] = torch.where(mask[...,1:].all(-1), False, mask[...,0])
         mask = mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, n_jobs), True)
 
         return mask
-
 
     def get_attn_mask(self, state: MSPRPState, env: MSPRPEnv):
         # omit dummy item mask

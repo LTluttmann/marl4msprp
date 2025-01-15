@@ -6,12 +6,16 @@ from torch.distributions import Categorical
 from tensordict import TensorDict
 from einops import rearrange
 
-from marlprp.env.env import MSPRPEnv
-from marlprp.models.policy_args import TransformerParams
-from marlprp.utils.ops import gather_by_index
-from marlprp.models.decoder.base import BaseDecoder
 
+from marlprp.env.env import MSPRPEnv
+from marlprp.env.instance import MSPRPState
+from marlprp.utils.ops import gather_by_index
+from marlprp.models.policy_args import MatNetParams
+from marlprp.models.encoder.base import MatNetEncoderOutput
+
+from .base import BaseDecoder
 from .mlp import JobMachinePointer
+from .attn import AttentionPointer
 
 
 __all__ = []
@@ -23,69 +27,71 @@ class SingleAgentAction(TypedDict):
 
 
 
+class HierarchicaDecoder(BaseDecoder):
 
-class BaseSingleAgentDecoder(BaseDecoder):
-    def __init__(self, pointer, params: TransformerParams) -> None:
-        super().__init__(params)
-        self.pointer = pointer
+    def __init__(self, model_params: MatNetParams):
+        super().__init__(model_params)
+        self.use_attn_mask = model_params.decoder_attn_mask
+        self.dec_strategy = None
+        self.shelf_pointer = AttentionPointer(model_params, decoder_type="shelf")
+        self.sku_pointer = AttentionPointer(model_params, decoder_type="sku")
 
-    def forward(
-        self, 
-        embeddings: TensorDict, 
-        td: TensorDict, 
-        env: MSPRPEnv, 
-        return_logp: bool = False
-    ):
-        
-        logits, mask = self.pointer(embeddings, td)
-        logp, mask = self._logits_to_logp(logits, mask)
-        td = self.dec_strategy.step(logp, mask, td)
-        action = self._translate_action(td, env)
+    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MSPRPEnv, return_logp = False):
+        node_mask = env.get_node_mask(state)
+        if self.use_attn_mask:
+            attn_mask = ~node_mask
+        shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
+        next_shelves, shelf_logps = self.dec_strategy.step(shelf_logits, node_mask, state, key="shelf")
+        # partial step through the environment to get intermediate state s'
+        intermediate_state = env.step(next_shelves, state)
+        # get new action mask from intermediate state
+        sku_mask = env.get_sku_mask(intermediate_state, next_shelves["shelf"])
+        if self.use_attn_mask:
+            attn_mask = ~sku_mask
+        sku_logits = self.sku_pointer(embeddings, state, attn_mask=attn_mask)
+        skus_to_pick, sku_logps = self.dec_strategy.step(sku_logits, sku_mask, intermediate_state, key="sku")
+
+        # step through environment with handled conflicts to get next state
+        next_state = env.step(skus_to_pick, intermediate_state)
+        # save actions as tensordict
+        actions = TensorDict({"shelf": next_shelves, "sku": skus_to_pick}, batch_size=next_shelves.batch_size)
+        masks = TensorDict({"shelf": node_mask, "sku": sku_mask}, batch_size=state.batch_size)
+
+        return_dict = {"state": state, "action": actions, "next": next_state, "action_mask": masks}
         if return_logp:
-            logp = self.dec_strategy.logp["action"][-1]
-            td["logprobs"] = logp
-        # insert action td
-        td.set("action", action)
-        return td
-    
-    def get_logp_of_action(self, embeddings: TensorDict, td: TensorDict):
-        logits, mask = self.pointer(embeddings, td)
-        logp, _ = self._logits_to_logp(logits, mask)
-        action_logp = gather_by_index(logp, td["action"]["idx"])
-        dist_entropys = Categorical(logp.exp()).entropy()
-        return action_logp, dist_entropys, None  # no mask due to padding in single agent settings
-    
-    @abc.abstractmethod
-    def _logits_to_logp(self, logits, mask) -> Tuple[torch.Tensor, torch.Tensor]:
-        pass
-    
-    @abc.abstractmethod
-    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
-        pass
-    
+            logps = TensorDict({"shelf": shelf_logps, "sku": sku_logps}, batch_size=shelf_logps.batch_size)
+            return_dict["logprobs"] = logps
 
-class JobMachineMLPDecoder(BaseSingleAgentDecoder):
-    def __init__(self, params: TransformerParams) -> None:
-        pointer = JobMachinePointer(params)
-        super().__init__(pointer, params)
+        return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
+    
+    def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
+        state = state.clone()
+        masks = masks.clone()
+        actions = actions.clone()
 
-    def _logits_to_logp(self, logits, mask):
-        mask = rearrange(mask, "b m j -> b (j m)")
-        logits = rearrange(logits, "b m j -> b (j m)")
-        logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
-        return logp, mask
-
-    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
-        # translate and store action
-        action = td["action"]
-        selected_machine = action % env.num_mas
-        selected_job = action // env.num_mas
-        action = TensorDict(
-            {
-                "idx": action, 
-                "job": selected_job, 
-                "machine": selected_machine,
-            },
-            batch_size=td.batch_size
+        shelf_action = actions["shelf"]
+        shelf_mask = masks["shelf"]
+        bs, n_agents, _ = shelf_mask.shape
+        # unmask the "stay" action, where the agent simply stays at current node. This is 
+        # selected in case of conflicts
+        shelf_mask.scatter_(-1, state.current_location.view(bs, n_agents, 1), False)
+        shelf_logp, shelf_entropy = self.shelf_decoder.get_logp_of_action(
+            embeddings, action=shelf_action, mask=shelf_mask, state=state
         )
-        return action
+        # update state
+        state.current_location = shelf_action["shelf"]
+
+        sku_action = actions["sku"]
+        sku_mask = masks["sku"]
+        # unmask the "stay" action, where the agent simply stays at current node. This is 
+        # selected in case of conflicts
+        sku_mask[..., 0] = False
+        sku_logp, sku_entropy = self.sku_decoder.get_logp_of_action(
+            embeddings, action=sku_action, mask=sku_mask, state=state
+        )
+
+        action_logp = shelf_logp + sku_logp
+        entropy = shelf_entropy + sku_entropy
+        loss_mask = state.agent_pad_mask
+        return action_logp, entropy, loss_mask
+    

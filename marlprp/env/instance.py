@@ -101,6 +101,17 @@ class MSPRPState:
         bs = self.batch_size
         depots = self.supply.new_zeros(size=(*bs, self.num_depots, self.num_skus))
         return torch.cat((depots, self.supply), dim=1)
+    
+    @property
+    def supply_w_depot_and_dummy(self):
+        bs = self.batch_size
+        depots = self.supply.new_zeros(size=(*bs, self.num_depots, self.num_skus+1))
+        supply_w_dummy = torch.cat((torch.zeros_like(self.supply[...,:1]), self.supply), dim=2)
+        return torch.cat((depots, supply_w_dummy), dim=1)
+
+    @property
+    def demand_w_dummy(self):
+        return torch.cat((torch.zeros_like(self.demand[:, :1]), self.demand), dim=1)
 
     @property
     def shelf_locations(self):
