@@ -1,5 +1,5 @@
 # @package _global_
-  env:
+env:
   env: msprp
   num_shelves: ???
   num_skus: ???

@@ -317,7 +317,7 @@ def solve(
         # check if a solution was found, otherwise raise time limit, retry with mipfocus or return empty solution
         if not m.SolCount > 0:
 
-            if retry_w_mipfocus:
+            if retry_w_mipfocus and not mipfocus:
                 return solve(instance, timeout, mipfocus=True, add_to_timeout=0, retry_w_mipfocus=False)
             
             elif add_to_timeout > 0:
@@ -327,7 +327,7 @@ def solve(
 
             else:
                 # add empty solution
-                return InstanceSolution(reward=None, tour_and_units=None, runtime=m.Runtime), found_opt
+                return None
             
         elif m.MIPGap > 1e-5: # use small threshold to avoid weird float behavior
             log.info("Preempting...Found non-optimal solution with obj. value %s and gap of %s percent" % 

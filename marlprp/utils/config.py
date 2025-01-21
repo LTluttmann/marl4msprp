@@ -126,11 +126,11 @@ class PolicyParams:
     embed_dim: int = 256
     num_encoder_layers: int = 4
     dropout: float = 0.0
-    eval_multistep: bool = True # field(init=False)
-    eval_per_agent: bool = field(init=False)
+    eval_multistep: bool = True
+    eval_per_agent: bool = True
     # to be specified by the learning algorithm
     _use_critic: bool = False
-    _stepwise_encoding: bool = field(init=False)
+    _stepwise_encoding: bool = False
     is_multiagent_policy: bool = True
     max_steps: int = None
 

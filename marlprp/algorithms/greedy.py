@@ -3,7 +3,7 @@ import time
 import torch
 import pyrootutils
 import numpy as np
-from marlprp.utils.ops import batchify, unbatchify
+from marlprp.utils.ops import batchify, unbatchify, gather_by_index
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.utils.config import EnvParams
@@ -23,15 +23,13 @@ instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 
 
-
 NUM_ITERS = 100
 
 
 def random__shelf_pointer(embeddings, state: MSPRPState, attn_mask = None):
-    bs = state.size(0)
-    num_agents = state.num_agents
-    num_nodes = state.num_nodes
-    return torch.rand((bs, num_agents, num_nodes))
+    agent_coordinates = gather_by_index(state.coordinates, state.current_location, dim=1)
+    logits = -torch.cdist(agent_coordinates, state.coordinates)
+    return logits
 
 
 def random__sku_pointer(embeddings, state: MSPRPState, attn_mask = None):
@@ -100,53 +98,3 @@ if __name__ == "__main__":
         }
 
     print(solutions)
-
-
-
-##ARCHIVE###
-
-# def random_policy(state: MSPRPState, env: MSPRPEnv):
-#     node_mask = env.get_node_mask(state)
-#     bs, num_agents, num_nodes = node_mask.shape
-
-#     # (bs, agents, shelves)
-#     node_logits = torch.rand_like(node_mask.float())
-
-#     actions = []
-#     busy_agents = []
-#     while not node_mask.all():
-#         logits_masked = node_logits.masked_fill(node_mask, -torch.inf)
-#         logits_reshaped = rearrange(logits_masked, "b a n -> b (n a)")
-#         probs = F.softmax(logits_reshaped, dim=-1)
-#         action = probs.multinomial(1).squeeze(1)
-
-#         # bs
-#         selected_agent = action % num_agents
-#         selected_node = action // num_agents
-
-#         # (bs, skus+1)
-#         sku_mask = env.get_sku_mask(state, selected_node.unsqueeze(1)).squeeze(1)
-
-#         sku_logits = torch.rand_like(sku_mask.float()).masked_fill(sku_mask, -torch.inf)
-#         sku_probs = F.softmax(sku_logits, dim=-1)
-#         selected_sku = sku_probs.multinomial(1).squeeze(1)
-
-#         action = TensorDict(
-#             {
-#                 "agent": selected_agent,
-#                 "shelf": selected_node,
-#                 "sku": selected_sku
-#             },
-#             batch_size=state.batch_size
-#         )
-#         actions.append(action)
-#         busy_agents.append(selected_agent)
-
-#         # mask the selected node for all other agents
-#         node_mask = node_mask.scatter(-1, selected_node.view(bs, 1, 1).expand(-1, num_agents, 1), True)
-#         # mask all actions / nodes for the selected agent
-#         node_mask = node_mask.scatter(-2, selected_agent.view(bs, 1, 1).expand(-1, 1, num_nodes), True)
-
-
-#     actions = torch.stack(actions, dim=1)
-#     return actions

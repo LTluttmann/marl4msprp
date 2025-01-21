@@ -236,9 +236,10 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 
     key = "shelf"
 
-    def __init__(self, params: MahamParams, dec_strategy = None) -> None:
+    def __init__(self, params: MahamParams, dec_strategy = None, pointer = None) -> None:
         self.embed_dim = params.embed_dim
-        pointer = AttentionPointer(params, decoder_type=self.key)
+        if pointer is None:
+            pointer = AttentionPointer(params, decoder_type=self.key)
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
         self.use_attn_mask = params.decoder_attn_mask
 
@@ -305,9 +306,10 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
     key = "sku"
 
-    def __init__(self, params: MahamParams, dec_strategy = None) -> None:
+    def __init__(self, params: MahamParams, dec_strategy = None, pointer = None) -> None:
         self.embed_dim = params.embed_dim
-        pointer = AttentionPointer(params, decoder_type=self.key)
+        if pointer is None:
+            pointer = AttentionPointer(params, decoder_type=self.key)
         self.use_attn_mask = params.decoder_attn_mask
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
 

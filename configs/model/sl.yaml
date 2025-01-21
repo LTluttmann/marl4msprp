@@ -8,8 +8,8 @@ model:
   rollout_batch_size: 100
   mini_batch_size: 2000
   num_starts: 100
-  eval_per_agent: False
-  eval_multistep: False
+  eval_per_agent: True
+  eval_multistep: True
   listnet_alpha: 0.0
   lookback_intervals: 0
   always_clear_buffer: true
@@ -17,8 +17,8 @@ model:
 
 
 train:
-  batch_size: 500
-  dataset_size: 2000
+  batch_size: 1000
+  dataset_size: 4000
 
 callbacks:
 

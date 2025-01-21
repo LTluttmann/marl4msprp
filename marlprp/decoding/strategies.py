@@ -47,7 +47,7 @@ class DecodingStrategy:
         self.logp = defaultdict(list)
         self.actions = defaultdict(list)
         self.select_best = select_best
-        self.tanh_clipping = tanh_clipping
+        self.tanh_clipping = tanh_clipping or 0
         self.num_starts = num_decoding_samples or 0
         self.only_store_selected_logp = only_store_selected_logp
 

@@ -35,7 +35,8 @@ def main(cfg: DictConfig):
             log.info(f"Start generating a solution for instance number {cnt}")
             solution = solve(instance, mipfocus=True, timeout=test_params.gurobi_timeout)
             solutions[cnt] = solution
-            objectives.append(solution.reward)
+            if solution is not None:
+                objectives.append(solution.reward)
             cnt += 1
     log.info(f"The average objective is {np.mean(objectives)}")
     torch.save(solutions, solution_file_name)
