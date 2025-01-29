@@ -1,32 +1,37 @@
-from typing import Optional
+from typing import Optional, Union
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.ops import gather_by_index
 from marlprp.env.generator import MSPRPGenerator
+from marlprp.utils.config import EnvParams, EnvParamList
+
 
 class MSPRPEnv:
 
     name = "msprp"
 
-    def __init__(self, params: EnvParams = None) -> None:
-        self.generator = MSPRPGenerator(params)
-        self.params = params
-
+    def __init__(self, params: Union[EnvParams, EnvParamList] = None) -> None:
+        if isinstance(params, EnvParamList):
+            self.generators = [MSPRPGenerator(param) for param in params]
+            self.params = params[0]
+        else:
+            self.generators = [MSPRPGenerator(params)]
+            self.params = params
 
     def reset(self, td: Optional[TensorDict] = None, batch_size=None) -> MSPRPState:
         """Reset function to call at the beginning of each episode"""
         if batch_size is None:
             batch_size = self.batch_size if td is None else td.batch_size
         if td is None or td.is_empty():
-            td = self.generator(batch_size=batch_size)
+            generator = np.random.choice(self.generators)
+            td = generator(batch_size=batch_size)
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
         return self._reset(td)
-
 
     def _reset(self, td: TensorDict) -> MSPRPState:
 
@@ -35,12 +40,13 @@ class MSPRPEnv:
         )
         return state
 
-
     def step(self, actions: torch.Tensor, state: MSPRPState) -> MSPRPState:
         state = state.clone()
+        precedence = actions.get("precedence", None)
+        if precedence is not None:
+            actions = actions.gather(1, precedence)
         
         actions = actions.split(1, dim=1)
-
         for action in actions:
             action = action.squeeze(1)
             agent = action["agent"]
@@ -230,6 +236,4 @@ class MSPRPEnv:
 
         reward = distance + self.params.packing_ratio_penalty * entropy
 
-        # if mode == "train":
-        #     reward = reward + self.params.zero_picks_penalty + state.zero_units_taken
         return -reward

@@ -132,6 +132,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         self.eval_per_agent = params.eval_per_agent
         self.pad = params.eval_multistep
         self.dec_strategy = dec_strategy
+        self.loss = "listnet"
 
     def forward(
         self, 
@@ -203,6 +204,12 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 
     def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
+        if self.loss == "ce":
+            return self._get_logp_of_action_ce(embeddings, action, mask, state)
+        else:
+            return self._get_logp_of_action_listnet(embeddings, action, mask, state)
+
+    def _get_logp_of_action_ce(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
         # get flat action indices
         action_indices = action["idx"].clone()
 
@@ -225,23 +232,35 @@ class BaseMultiAgentDecoder(BaseDecoder):
             dist_entropys = Categorical(probs=logp.exp()).entropy().unsqueeze(-1)
         
         return selected_logp, dist_entropys
+    
+    def _get_logp_of_action_listnet(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
+        # get flat action indices
+        action_indices = action["idx"].clone()
+        action_indices = action_indices.gather(1, action["precedence"])
+        action_sort_idx = torch.argsort(action["precedence"])
+        action_indices = action_indices.split(1, dim=1)
+        # get logits and mask once
+        logits = self.pointer(embeddings, state)
+        bs, num_agents, num_actions = logits.shape
+        selected_logps = []
+        for rank, action_idx in enumerate(action_indices):
+            agent = action["precedence"][:, rank]
+            # (bs, num_actions)
+            logp, _ = self._logits_to_logp(logits, mask)
+            #(bs, 1)
+            selected_logp = gather_by_index(logp, action_idx, dim=1, squeeze=False)
+            selected_logps.append(selected_logp)
+            # mask all predecessor actions for coming successor (like in listnet)
+            mask.scatter_(1, agent[:, None, None].expand(bs,1,num_actions), True)
 
+        selected_logps = torch.cat(selected_logps, dim=1)
+        # reorder according to agent indices
+        selected_logps = selected_logps.gather(1, action_sort_idx)
+        assert selected_logps.isfinite().all()
 
-################################################################
-#########################  DECODER #############################
-################################################################
-
-
-class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
-
-    key = "shelf"
-
-    def __init__(self, params: MahamParams, dec_strategy = None, pointer = None) -> None:
-        self.embed_dim = params.embed_dim
-        if pointer is None:
-            pointer = AttentionPointer(params, decoder_type=self.key)
-        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
-        self.use_attn_mask = params.decoder_attn_mask
+        dist_entropys = Categorical(logits=logits).entropy()
+        
+        return selected_logps, dist_entropys
 
     def _logits_to_logp(self, logits, mask):
         if torch.is_grad_enabled() and self.eval_per_agent:
@@ -258,6 +277,22 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
             
         return logp, mask
+
+################################################################
+#########################  DECODER #############################
+################################################################
+
+
+class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
+
+    key = "shelf"
+
+    def __init__(self, params: MahamParams, dec_strategy = None, pointer = None) -> None:
+        self.embed_dim = params.embed_dim
+        if pointer is None:
+            pointer = AttentionPointer(params, decoder_type=self.key)
+        super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
+        self.use_attn_mask = params.decoder_attn_mask
 
     def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
         # translate and store action
@@ -312,22 +347,6 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
             pointer = AttentionPointer(params, decoder_type=self.key)
         self.use_attn_mask = params.decoder_attn_mask
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
-
-    def _logits_to_logp(self, logits, mask):
-        if torch.is_grad_enabled() and self.eval_per_agent:
-            # when training we evaluate on a per agent basis
-            # perform softmax per agent
-            logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
-            # flatten logp for selection
-            logp = rearrange(logp, "b a s -> b (s a)")
-
-        else:
-            # when rolling out, we sample iteratively from flattened prob dist
-            mask = rearrange(mask, "b a s -> b (s a)")
-            logits = rearrange(logits, "b a s -> b (s a)")
-            logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
-            
-        return logp, mask
 
     def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
         batch_idx = torch.arange(action_idx.size(0), device=action_idx.device)

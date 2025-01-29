@@ -1,0 +1,7 @@
+env: msprp
+num_agents: null
+min_demand: 0
+max_demand: 4
+min_supply: 1
+avg_supply_to_demand_ratio: 2.0
+num_depots: 1

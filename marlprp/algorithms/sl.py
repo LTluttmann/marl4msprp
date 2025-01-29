@@ -11,7 +11,7 @@ from marlprp.env.env import MSPRPEnv
 from marlprp.utils.ops import batchify, unbatchify
 from marlprp.algorithms.model_args import SelfLabelingParameters
 from marlprp.algorithms.base import LearningAlgorithmWithReplayBuffer
-from marlprp.algorithms.losses import ce_loss, listnet_loss, calc_adv_weights
+from marlprp.algorithms.losses import ce_loss, simple_listnet_loss, calc_adv_weights
 from marlprp.utils.config import TrainingParams, ValidationParams, TestParams
 
 
@@ -54,25 +54,24 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         if model_params.loss == "ce":
             self.loss_fn = ce_loss
         else:
-            self.loss_fn = partial(listnet_loss, alpha=model_params.listnet_alpha)
+            self.loss_fn = simple_listnet_loss
+
+        self.always_clear_buffer = model_params.always_clear_buffer
+        self.update_after_every_batch = model_params.update_after_every_batch
 
     def _update(self):
         losses = []
 
         for _ in range(self.num_training_batches):
 
-            sub_td = self.rb.sample(self.mini_batch_size)
+            sub_td = self.rb_ensamble.sample(self.mini_batch_size)
             sub_td = sub_td.to(self.device)
 
             weight = sub_td.get("_weight", None)
 
             logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
 
-            loss = self.loss_fn(logp, entropy, mask=mask, entropy_coef=self.entropy_coef, precedence=sub_td["action"]["sku"]["precedence"])
-
-            if self.model_params.priority_key is not None:
-                sub_td.set(self.model_params.priority_key, loss.detach().clone())
-                self.rb.update_tensordict_priority(sub_td)
+            loss = self.loss_fn(logp, entropy, mask=mask, entropy_coef=self.entropy_coef)
 
             # (bs)
             adv_weights = sub_td.get("adv_weights", None)
@@ -90,9 +89,11 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
 
         loss = torch.stack(losses, dim=0).mean()
         self.log("train/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        if self.always_clear_buffer:
+            self.clear_buffer()
 
     def training_step(self, batch: TensorDict, batch_idx: int):
-        
+        batch, instance_id = batch
         orig_state = self.env.reset(batch)
         bs = orig_state.size(0)
         train_rewards = []
@@ -136,24 +137,20 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             # (bs, #samples)
             rewards = unbatchify(rewards, self.num_starts)
             train_rewards.append(rewards.mean(1))
-            reward_std.append(rewards.std(1) / (-rewards.mean(1)))
+            reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
             # (bs)
             best_rew, best_idx = rewards.max(dim=1)
             # (bs)
             best_states = states_unbs.gather(
                 1, best_idx[:, None, None].expand(-1, 1, steps)
             ).squeeze(1)
-            if False:
-                # add advantage
-                advantage = best_rew - rewards.mean(1, keepdim=False)
-                adv_weights = _calc_adv_weights(advantage)
-                best_states["adv_weights"] = adv_weights.unsqueeze(1).expand(*best_states.shape)
+
             # flatten so that every step is an experience
             best_states = best_states.flatten()
             # filter out steps where the instance is already in terminal state. There is nothing to learn from
             best_states = best_states[~best_states["mask"]]
             # save to memory
-            self.rb.extend(best_states)
+            self.rbs[instance_id].extend(best_states)
             # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
 
         reward_std = torch.cat(reward_std, 0).mean()
@@ -161,7 +158,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         self.log("train/reward_std", reward_std, on_epoch=True, sync_dist=True)
         self.log("train/reward_mean", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        if self.trainer.is_last_batch or self.model_params.update_after_every_batch:
+        if self.trainer.is_last_batch or self.update_after_every_batch:
             self._update()
 
         dummy_loss = torch.tensor(0.0, device=self.device)  # dummy loss
@@ -182,15 +179,18 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.best_reward = epoch_average
             self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
 
-        if self.model_params.always_clear_buffer or improved:
-            self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
-            self.rb.empty()
-            gc.collect()
-            torch.cuda.empty_cache()
+        if self.always_clear_buffer or improved:
+            self.clear_buffer()
 
         if (self.current_epoch + 1) % self.lookback_intervals == 0:
             self.policy.load_state_dict(self.old_tgt_policy_state)
             self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
+
+    def clear_buffer(self):
+        self.pylogger.info(f"Emptying replay buffer of size {self.rb_size}")
+        self.rb_ensamble.empty()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def state_dict(self, *args, **kwargs):
         # Get the original state_dict
@@ -205,9 +205,9 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         # Load the remaining state_dict
         super().load_state_dict(state_dict, *args, **kwargs)
    
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        super().on_train_batch_end(outputs, batch, batch_idx)
-        if self.model_params.update_after_every_batch:
-            self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
-            self.rb.empty()
-            torch.cuda.empty_cache()
+    # def on_train_batch_end(self, outputs, batch, batch_idx):
+    #     super().on_train_batch_end(outputs, batch, batch_idx)
+    #     if self.model_params.update_after_every_batch:
+    #         self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
+    #         self.rb.empty()
+    #         torch.cuda.empty_cache()

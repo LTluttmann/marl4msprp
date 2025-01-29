@@ -212,24 +212,28 @@ def hydra_run_wrapper(func):
     return wrapper
 
 
-def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig):
+def get_wandb_logger(cfg: DictConfig, model_params: ModelParams, hc: HydraConfig, model):
     policy_params = model_params.policy
     env_params = policy_params.env
+    num_agents = env_params.num_agents or "all_"
     default_tags = [
         model_params.algorithm,
         policy_params.policy, 
-        env_params.name,
-        f"{env_params.num_shelves}j",
-        f"{env_params.num_skus}m",
+        env_params.id,
+        num_agents,
         "eval_multi" if model_params.eval_multistep else "eval_single",
         "eval_per_agent" if model_params.eval_per_agent else "eval_all",
     ]
     logger_cfg = OmegaConf.to_container(cfg.get("logger"))
     new_tags = logger_cfg.pop("tags", [])
+    watch = logger_cfg.pop("watch", False)
     all_tags = default_tags + new_tags
-    return WandbLogger(
+    logger = WandbLogger(
         save_dir=hc.runtime.output_dir,
         tags=all_tags,
-        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.name}-{env_params.num_shelves}s-{env_params.num_skus}i-{env_params.num_agents}a",
+        name=f"{model_params.algorithm}-{policy_params.policy}-{env_params.id}-{num_agents}a",
         **logger_cfg
     )
+    if watch:
+        logger.watch(model)
+    return logger

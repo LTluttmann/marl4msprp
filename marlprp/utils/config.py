@@ -47,7 +47,7 @@ class BaseEnvParams:
 
     capacity: int = 6
 
-    is_multi_instance: bool = field(init=False)
+    is_multi_instance: bool = False
     
     packing_ratio_penalty: float = 0.1
     zero_picks_penalty: float = 0.05
@@ -72,7 +72,9 @@ class BaseEnvParams:
                 self.goal = "min-sum"
             else:
                 self.goal = "min-max"
-
+        
+        if self.id is None:
+            self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
 
     def __init_subclass__(cls, *args, **kw):
@@ -93,19 +95,48 @@ class BaseEnvParams:
 class EnvParams(BaseEnvParams):
     name: str = "msprp"
     num_skus: Union[List, int] = 3
+    size: int = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
-        if isinstance(self.num_shelves, int):
-            self.num_storage_locations = infer_num_storage_locations(
-                self.num_skus, 
-                self.num_shelves, 
-                avg_loc_per_sku=self.avg_loc_per_sku, 
-                num_storage_locations=self.num_storage_locations
-            )
-            self.is_multi_instance = False
-        else:
-            self.is_multi_instance = True
+        self.num_storage_locations = infer_num_storage_locations(
+            self.num_skus, 
+            self.num_shelves, 
+            avg_loc_per_sku=self.avg_loc_per_sku, 
+            num_storage_locations=self.num_storage_locations
+        )
+        self.size = (self.num_shelves + self.num_depots) * self.num_skus
+
+
+class EnvParamList:
+    
+    def __init__(self, param_list: List[EnvParams] = [], probs = None):
+        self.envs = param_list
+        self.name = "msprp"
+        self.id = "multi_instance"
+        self.always_mask_depot: bool = False
+        self.is_multiinstance: bool = True    
+        self.generator_probs = probs
+
+    def append(self, item):
+        self.envs.append(item)
+
+    def __getitem__(self, index):
+        # Allows element access using indexing
+        return self.envs[index]
+
+    @property
+    def goal(self):
+        return self.envs[0].goal
+    
+    @property
+    def num_agents(self):
+        return self.envs[0].num_agents
+    
+    def __len__(self):
+        # Returns the length of the list
+        return len(self.envs)
+
 
 
 @dataclass(kw_only=True)

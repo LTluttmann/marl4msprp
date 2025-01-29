@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from tensordict import TensorDict
 
-from marlprp.utils.config import EnvParams, LargeEnvParams
+from marlprp.utils.config import EnvParams, LargeEnvParams, EnvParamList
 
 
 class MSPRPGenerator:
@@ -13,10 +13,7 @@ class MSPRPGenerator:
     ):
 
         super(MSPRPGenerator, self).__init__()
-
-        # np.random.seed(instance_params.seed)
-        # torch.manual_seed(instance_params.seed)
-
+        
         self.num_depots = instance_params.num_depots
         self.num_skus = instance_params.num_skus
         self.num_shelves = instance_params.num_shelves
@@ -39,6 +36,7 @@ class MSPRPGenerator:
             self.max_supply = instance_params.max_supply
 
         self._num_agents = instance_params.num_agents
+        self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
     def _simulate_batch(self, bs: tuple):
         # simulate supply [BS, P, S]
@@ -110,8 +108,6 @@ class MSPRPGenerator:
     def __call__(self, batch_size) -> TensorDict:
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
         return self._simulate_batch(batch_size)
-
-
 
 
 class LargeMSPRPInstanceGenerator:

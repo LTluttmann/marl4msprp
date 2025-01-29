@@ -32,7 +32,7 @@ def simple_listnet_loss(
         logp: torch.Tensor, 
         entropy: torch.Tensor, 
         mask: torch.Tensor = None, 
-        entropy_coef: float = 0,
+        entropy_coef: float = 0.01,
         **kwargs
     ):
 

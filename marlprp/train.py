@@ -15,6 +15,7 @@ from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.utils.utils import hydra_run_wrapper, get_wandb_logger
 from marlprp.utils.config import (
     EnvParams, 
+    EnvParamList,
     PolicyParams,
     ModelParams, 
     TrainingParams, 
@@ -31,7 +32,8 @@ def get_trainer(
         cfg: DictConfig, 
         train_params: TrainingParams,
         model_params: ModelParams,
-        hc: HydraConfig
+        hc: HydraConfig,
+        model,
     ) -> RL4COTrainer:
     
     log.info("Instantiating callbacks...")
@@ -39,7 +41,7 @@ def get_trainer(
 
     if cfg.get("logger", None) is not None:
         log.info("Instantiating loggers...")
-        logger = get_wandb_logger(cfg, model_params, hc)
+        logger = get_wandb_logger(cfg, model_params, hc, model)
 
     devices = train_params.devices
     log.info(f"Running job on GPU with ID {', '.join([str(x) for x in devices])}")
@@ -66,8 +68,13 @@ def get_trainer(
 @hydra.main(version_base=None, config_path="../configs/", config_name="main")
 @hydra_run_wrapper
 def main(cfg: DictConfig):
-
-    instance_params = EnvParams.initialize(**cfg.env)
+    if hasattr(cfg, "env_list"):
+        instance_params = EnvParamList()
+        for params in cfg.env_list.values():
+            params = EnvParams.initialize(**params)
+            instance_params.append(params)
+    else:
+        instance_params = EnvParams.initialize(**cfg.env)
     train_params = TrainingParams(**cfg.train)
     val_params = ValidationParams(**cfg.val)
     test_params = TestParams(**cfg.test)
@@ -91,22 +98,7 @@ def main(cfg: DictConfig):
         model_params = ModelParams.initialize(policy_params=policy_params, **cfg.model)
         env = MSPRPEnv(params=instance_params)
         policy = RoutingPolicy.initialize(policy_params)
-        trainer = get_trainer(cfg, train_params, model_params, hc)
-        if model_params.warmup_params is not None:
-            warmup_model = LearningAlgorithm.initialize(
-                env, 
-                policy, 
-                model_params=model_params.warmup_params,
-                train_params=train_params,
-                val_params=val_params, 
-                test_params=test_params
-            )
-            log.info("Warming up the policy for one epoch...")
-            trainer.fit_loop.max_epochs = train_params.warmup_epochs or 1
-            trainer.fit(warmup_model)
-            trainer.fit_loop.max_epochs = train_params.epochs
-            log.info("...warmup finished")
-
+       
         model = LearningAlgorithm.initialize(
             env, 
             policy, 
@@ -116,6 +108,7 @@ def main(cfg: DictConfig):
             test_params=test_params
         )
 
+        trainer = get_trainer(cfg, train_params, model_params, hc, model)
     # send hparams to all loggers
 
     for logger in trainer.loggers:

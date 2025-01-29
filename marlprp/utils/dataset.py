@@ -1,10 +1,11 @@
 from omegaconf import DictConfig
-
+from functools import partial
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
-
+from torch.utils.data.sampler import Sampler
 from marlprp.env.env import MSPRPEnv
+
 
 
 class SynetheticDataset(Dataset):
@@ -23,6 +24,7 @@ class SynetheticDataset(Dataset):
         self.num_samples = num_samples 
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self.kwargs = kwargs
 
     def __len__(self):
         if self.drop_last:
@@ -31,32 +33,39 @@ class SynetheticDataset(Dataset):
             return int(np.ceil(self.num_samples / self.batch_size))
     
     def __getitem__(self, _):
-        td = self.env.reset(batch_size=self.batch_size)
+        td = self.env.reset(batch_size=self.batch_size, **self.kwargs)
         return td
     
+ 
 
 class DistributableSynetheticDataset(Dataset):
     def __init__(
             self, 
             env: MSPRPEnv,
             num_samples: int, 
+            current_epoch: int,
+            max_epochs: int,
             **kwargs
         ) -> None:
         
         super().__init__()
-
+        self.current_epoch = current_epoch
+        self.max_epochs = max_epochs
         self.num_samples = num_samples 
-        self.dataset = env.generator(batch_size=self.num_samples)
+
+        self.datasets = {g.id: g(batch_size=num_samples) for g in env.generators}
 
     def __len__(self):
         return self.num_samples
     
-    def __getitem__(self, idx):
-        return self.dataset[idx]
+    def __getitem__(self, index_tuple):
+        dataset_idx, sample_idx = index_tuple
+        return self.datasets[dataset_idx][sample_idx], dataset_idx
     
     @staticmethod
-    def collate_fn(batch):
-        return torch.stack(batch, 0)
+    def collate_fn(batch_and_idx):
+        batch, dataset_idx = zip(*batch_and_idx)
+        return torch.stack(batch, 0), dataset_idx[0]
 
 
 class InstanceFilesDataset(Dataset):
@@ -82,6 +91,38 @@ class InstanceFilesDataset(Dataset):
         td = torch.stack(batch, 0)
         return td
 
+
+
+class SequentialSampler(Sampler[int]):
+
+    def __init__(
+            self, 
+            data_source: DistributableSynetheticDataset,
+            epoch: int, 
+            max_epochs: int,
+        ) -> None:
+        self.datasets = data_source.datasets
+        self.dataset_indices = list(self.datasets.keys())
+        self.epoch = epoch
+        self.max_epochs = max(1, max_epochs - 10)
+
+        self.init_dist = np.array([1.] + [0.] * (len(self.dataset_indices) - 1), dtype=float)
+        self.tgt_dist = np.array([1 / len(self.dataset_indices)] * len(self.dataset_indices), dtype=float)
+
+    def __iter__(self):
+        dataset_idx = np.random.choice(self.dataset_indices, p=self.generator_distribution)
+        indices = list(range(len(self.datasets[dataset_idx])))
+        yield from [(dataset_idx, i) for i in indices]
+
+    def __len__(self) -> int:
+        return min([len(x) for x in self.datasets]) 
+
+    @property
+    def generator_distribution(self):
+        step_t = self.epoch / self.max_epochs
+        return (1-step_t) * self.init_dist + step_t * self.tgt_dist
+
+
     
 class EnvLoader(DataLoader):
     def __init__(
@@ -94,6 +135,9 @@ class EnvLoader(DataLoader):
         reload_every_n: int = 1,
         sampler = None,
         batch_sampler = None,
+        mode: str = "train",
+        epoch: int = 0,
+        max_epochs: int = None,
         **kwargs
     ) -> None:
 
@@ -112,14 +156,20 @@ class EnvLoader(DataLoader):
             dataset = DistributableSynetheticDataset(
                 env=env,
                 num_samples=dataset_size,
+                current_epoch=epoch,
+                max_epochs=max_epochs,
                 **kwargs
             )
+            if sampler is not None:
+                raise ValueError("passing sampler externally not implemented yet")
+            sampler = SequentialSampler(dataset, epoch, max_epochs)
             super().__init__(
                 dataset=dataset, 
                 batch_size=batch_size,
                 collate_fn=dataset.collate_fn,
                 sampler=sampler,
-                batch_sampler=batch_sampler
+                batch_sampler=batch_sampler,
+                shuffle=False,
             )
 
         else:
@@ -135,38 +185,36 @@ class EnvLoader(DataLoader):
                 batch_size=None, 
                 collate_fn=lambda x: x,
                 sampler=sampler,
-                batch_sampler=batch_sampler
+                batch_sampler=batch_sampler,
+                shuffle=False,
             )
         
 
-def get_file_dataloader(env, batch_size: int, file_dir: str = None):
+def get_file_dataloader(env, batch_size: int, file_dir: dict = None, num_agents = None):
     if file_dir is None:
         return {}
-    
-    file_read_fns = {
-        "luttmann": read_luttmann
-    }
-    
-    file_dirs = file_dir if isinstance(file_dir, (DictConfig, dict)) else {"files": file_dir}
-
+        
     dataloader = {
         file_name: EnvLoader(
             env=env,
             path=file_dir, 
             batch_size=batch_size,
-            read_fn=file_read_fns[file_name]
+            read_fn=partial(read_luttmann, num_agents=num_agents)
         )
-        for file_name, file_dir in file_dirs.items()
+        for file_name, file_dir in file_dir.items()
     }
     return dataloader
 
 
-def read_luttmann(path):
+def read_luttmann(path, num_agents):
     td = torch.load(path)
     bs = td.batch_size
     # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)
-    num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["init_capacity"])
-    max_num_agents = int(num_agents.max().item())
+    if num_agents is None:
+        num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["init_capacity"])
+        max_num_agents = int(num_agents.max().item())
+    else:
+        max_num_agents = num_agents
     agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*bs, max_num_agents)
     num_agents = max_num_agents
     current_location = td["current_location"].repeat(1, num_agents)

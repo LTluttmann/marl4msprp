@@ -1,3 +1,4 @@
+import os
 import math
 import copy
 from omegaconf import ListConfig
@@ -11,6 +12,7 @@ import torch.distributed as dist
 from lightning import LightningModule
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from rl4co.utils.optim_helpers import create_scheduler
+from torchrl.data.replay_buffers import ReplayBufferEnsemble
 
 from marlprp.env.env import MSPRPEnv
 from marlprp.models.policies import RoutingPolicy
@@ -60,7 +62,7 @@ class LearningAlgorithm(LightningModule):
         super(LearningAlgorithm, self).__init__()
 
         self.pylogger = logger
-        self.save_hyperparameters("model_params")
+        # self.save_hyperparameters("model_params")
         self.model_params = model_params
         self.train_params = train_params
         self.val_params = val_params
@@ -97,6 +99,11 @@ class LearningAlgorithm(LightningModule):
     @property
     def world_size(self):
         return self.trainer.world_size
+    
+    @property
+    def test_data_dirs(self):
+        dir_fn = lambda instance: os.path.join(self.test_params.data_dir, instance, "td_data.pth")
+        return {f"luttmann/{g.id}": dir_fn(g.id) for g in self.env.generators}
 
     @classmethod
     def initialize(
@@ -159,6 +166,7 @@ class LearningAlgorithm(LightningModule):
 
     # PyTorch Lightning's built-in validation_step method
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        batch, instance_id = batch
         state = self.env.reset(batch)
         reward = self.policy(state, self.env)["reward"]
         val_set_name = self.val_set_names[dataloader_idx]
@@ -251,6 +259,9 @@ class LearningAlgorithm(LightningModule):
             batch_size=params.batch_size,
             dataset_size=params.dataset_size,
             reload_every_n=1,
+            mode="val",
+            epoch=self.current_epoch,
+            max_epochs=self.trainer.max_epochs,
         )
 
         return dataloader
@@ -260,7 +271,10 @@ class LearningAlgorithm(LightningModule):
             env=self.env, 
             batch_size=self.train_batch_size, 
             dataset_size=self.train_params.dataset_size,
-            reload_every_n=self.train_params.reload_every_n
+            reload_every_n=1,
+            mode="train",
+            epoch=self.current_epoch,
+            max_epochs=self.trainer.max_epochs,
         )
     
     def val_dataloader(self):
@@ -272,7 +286,8 @@ class LearningAlgorithm(LightningModule):
             test_file_dls = get_file_dataloader(
                 self.env, 
                 self.test_params.batch_size, 
-                self.test_params.data_dir
+                self.test_data_dirs,
+                num_agents=self.model_params.policy.env.num_agents
             )
         except FileNotFoundError as e:
             self.pylogger.warning(e.__str__())
@@ -376,7 +391,6 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
         opt.zero_grad()
 
 
-
 class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def __init__(
         self, 
@@ -421,19 +435,31 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         self.mini_batch_size = mini_batch_size
 
         # make replay buffer
-        self.rb = make_replay_buffer(
-            buffer_size=model_params.buffer_size, 
-            # batch_size=self.mini_batch_size, 
-            device=model_params.buffer_storage_device, 
-            priority_key=model_params.priority_key,
-            **model_params.buffer_kwargs
+        self.rbs = {
+            x.id: make_replay_buffer(
+                buffer_size=model_params.buffer_size, 
+                # batch_size=self.mini_batch_size, 
+                device=model_params.buffer_storage_device, 
+                priority_key=model_params.priority_key,
+                **model_params.buffer_kwargs
+            ) 
+            for x in self.env.generators
+        }
+        self.rb_ensamble = ReplayBufferEnsemble(
+            *self.rbs.values(),
+            num_buffer_sampled=1
         )
+
+
+    @property
+    def rb_size(self):
+        return sum([len(rb) for rb in self.rb_ensamble._rbs])
 
     @property
     def num_training_batches(self):
         # one complete iteration through the rb uses ceil(||rb|| / bs) batches. 
         # We multiple this by inner_epochs, to do inner_epochs iters through rb
-        num_batches = int(self.inner_epochs * math.ceil(len(self.rb) / self.mini_batch_size))
+        num_batches = int(self.inner_epochs * math.ceil(self.rb_size / self.mini_batch_size))
         if self.world_size > 1:
             # in distributed settings, the number of batches determined above could be different
             # among ranks. Since this would cause ddp to fail, we take the max over ranks here
@@ -457,7 +483,6 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def mini_batch_size(self, value):
         self._mini_batch_size = value
 
-
     @property
     def ref_model_temp(self):
         return self._ref_model_temp
@@ -471,7 +496,6 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             top_p=self.train_params.decoding["top_p"],
             temperature=self.ref_model_temp
         )  
-
 
 
 class EvalModule(LearningAlgorithm):

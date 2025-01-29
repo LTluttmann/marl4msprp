@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - 10s-3i-20p
+  - 10s-6i-20p
+  - 10s-9i-20p
+  - 25s-12i-50p
+  - 25s-15i-50p
+  - 25s-18i-50p
+  - 40s-15i-100p
+  - 40s-20i-100p 
+
+env:
+  id: multi_instance
+
+val:
+  dataset_size: 10000
+  batch_size: 100

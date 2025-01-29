@@ -10,7 +10,7 @@ env:
   max_demand: 4
   min_supply: 1
   avg_supply_to_demand_ratio: 2.0
-
+  id: ${env.num_shelves}s-${env.num_skus}i-${env.num_storage_locations}p
 
 test:
   data_dir: 

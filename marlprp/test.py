@@ -32,7 +32,9 @@ def main(cfg: DictConfig):
     hc = HydraConfig.get()
     pl.seed_everything(test_params.seed)
 
-    model, model_params = EvalModule.init_from_checkpoint(test_params, instance_params, policy_cfg=cfg.get("policy", None))
+    model, model_params = EvalModule.init_from_checkpoint(
+        test_params, instance_params, policy_cfg=cfg.get("policy", None)
+    )
     
     logger = get_wandb_logger(cfg, model_params, hc)
 
