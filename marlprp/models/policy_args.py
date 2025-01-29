@@ -25,9 +25,9 @@ class TransformerParams(PolicyParams):
 class MatNetParams(TransformerParams):
     policy: str = "ham"
     ms_hidden_dim: int = None
-    mask_no_edge: bool = False
+    mask_no_edge: bool = True
     decoder_attn_mask: bool = False
-    ms_split_heads: bool = True
+    ms_split_heads: bool = False
 
     def __post_init__(self):
         super().__post_init__()

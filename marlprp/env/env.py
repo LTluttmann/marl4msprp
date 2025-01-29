@@ -22,6 +22,8 @@ class MSPRPEnv:
         else:
             self.generators = [MSPRPGenerator(params)]
             self.params = params
+            
+        self.generators = sorted(self.generators, key=lambda x: x.size)
 
     def reset(self, td: Optional[TensorDict] = None, batch_size=None) -> MSPRPState:
         """Reset function to call at the beginning of each episode"""
@@ -145,6 +147,7 @@ class MSPRPEnv:
         no_more_demand = state.demand.eq(0).all(1)
 
         if self.params.always_mask_depot:
+            raise ValueError("This makes not sense in mix-max problem")
             mask_depot = ~mask_loc_per_agent.all(-1, keepdims=True).repeat(1, 1, state.num_depots)
         else:
             # We should avoid traveling to the depot back-to-back, except instance is done

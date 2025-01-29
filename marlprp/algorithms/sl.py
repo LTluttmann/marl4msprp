@@ -1,6 +1,7 @@
 import gc
 import copy
 from functools import partial
+from omegaconf import DictConfig
 
 import torch
 import torch.nn as nn
@@ -50,7 +51,8 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             dtype=lambda x: int(x) or float("inf")
         )
        
-        self.best_reward = float("-inf")
+        self.best_rewards = {instance: float("-inf") for instance in self.rbs.keys()}
+
         if model_params.loss == "ce":
             self.loss_fn = ce_loss
         else:
@@ -62,9 +64,14 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
     def _update(self):
         losses = []
 
+        rb_distribution = torch.tensor([len(x) for x in self.rb_ensamble.storage], device=self.device)
+        rb_distribution = torch.where(rb_distribution == 0, -torch.inf, rb_distribution)
+        rb_distribution = torch.softmax(rb_distribution, dim=0)
+        self.rb_ensamble.sampler.p = rb_distribution
+
         for _ in range(self.num_training_batches):
 
-            sub_td = self.rb_ensamble.sample(self.mini_batch_size)
+            sub_td = self.rb_ensamble.sample(self.mini_batch_size)[0]
             sub_td = sub_td.to(self.device)
 
             weight = sub_td.get("_weight", None)
@@ -96,12 +103,16 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         batch, instance_id = batch
         orig_state = self.env.reset(batch)
         bs = orig_state.size(0)
+        if isinstance(self.rollout_batch_size, (dict, DictConfig)):
+            rollout_batch_size = self.rollout_batch_size.get(instance_id, self.train_batch_size)
+        else:
+            rollout_batch_size = self.rollout_batch_size
         train_rewards = []
         reward_std = []
         # data gathering loop
-        for i in range(0, bs, self.rollout_batch_size):
+        for i in range(0, bs, rollout_batch_size):
 
-            next_state = orig_state[i : i + self.rollout_batch_size]
+            next_state = orig_state[i : i + rollout_batch_size]
 
             next_state = batchify(next_state, self.num_starts)
             state_stack = []
@@ -169,26 +180,27 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             return
         
         improved = False
-        epoch_average = super().on_validation_epoch_end()
-        if epoch_average > self.best_reward:
+        epoch_averages = super().on_validation_epoch_end()
+        if self.improved_at_least_half(epoch_averages):
+            result_string = "\n".join([f"{idx}: {round(-self.best_rewards[idx], 2)} -> {round(-reward, 2)}" for idx, reward in epoch_averages.items()])
             self.pylogger.info(
-                f"Improved val reward {round(-self.best_reward, 2)} -> {round(-epoch_average, 2)}. " + \
-                "Updating Reference Policy..."
+                f"Improved val reward: \n{result_string} \nUpdating Reference Policy..."
             )
             improved = True
-            self.best_reward = epoch_average
+            self.best_rewards.update(epoch_averages)
             self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
 
         if self.always_clear_buffer or improved:
             self.clear_buffer()
 
-        if (self.current_epoch + 1) % self.lookback_intervals == 0:
-            self.policy.load_state_dict(self.old_tgt_policy_state)
+        if ((self.current_epoch + 1) % self.lookback_intervals == 0) and (self.current_epoch + self.lookback_intervals < self.trainer.max_epochs):
+            self.policy.load_state_dict(copy.deepcopy(self.old_tgt_policy_state))
             self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
 
     def clear_buffer(self):
         self.pylogger.info(f"Emptying replay buffer of size {self.rb_size}")
-        self.rb_ensamble.empty()
+        for rb in self.rbs.values():
+            rb.empty()
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -196,14 +208,23 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         # Get the original state_dict
         state_dict = super().state_dict(*args, **kwargs)
         # Augment with metadata
-        state_dict["best_reward"] = self.best_reward
+        state_dict["best_rewards"] = self.best_rewards
         return state_dict
 
     def load_state_dict(self, state_dict, *args, **kwargs):
         # Extract metadata if it exists
-        self.best_reward = state_dict.pop("best_reward", self.best_reward)
+        self.best_rewards = state_dict.pop("best_rewards", self.best_rewards)
         # Load the remaining state_dict
         super().load_state_dict(state_dict, *args, **kwargs)
+
+    def is_pareto_efficient(self, epoch_averages):
+        not_worse = [epoch_reward >= self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
+        better = [epoch_reward > self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
+        return all(not_worse) and any(better)
+
+    def improved_at_least_half(self, epoch_averages):
+        better = [epoch_reward > self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
+        return sum(better) / len(epoch_averages) > .5
    
     # def on_train_batch_end(self, outputs, batch, batch_idx):
     #     super().on_train_batch_end(outputs, batch, batch_idx)

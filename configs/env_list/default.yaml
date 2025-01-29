@@ -12,6 +12,33 @@ defaults:
 env:
   id: multi_instance
 
+model:
+  algorithm: sl
+  inner_epochs: 10
+  rollout_batch_size:
+    10s-3i-20p: 500
+    10s-6i-20p: 500
+    10s-9i-20p: 250
+    25s-12i-50p: 100
+    25s-15i-50p: 100
+    25s-18i-50p: 50
+    40s-15i-100p: 50
+    40s-20i-100p: 50
+  mini_batch_size: 500
+  num_starts: 100
+  eval_per_agent: False
+  eval_multistep: True
+  always_clear_buffer: True
+  update_after_every_batch: False
+
+
+train:
+  batch_size: 500
+  dataset_size: 5000
+  optimizer_kwargs:
+    policy_lr: 5e-5
+    weight_decay: 1e-6
+
 val:
   dataset_size: 10000
   batch_size: 100

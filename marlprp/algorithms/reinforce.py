@@ -91,5 +91,5 @@ class REINFORCE(LearningAlgorithm):
         }
            
     def on_validation_epoch_end(self):
-        val_reward = self._get_global_validation_reward()
-        self.baseline.epoch_callback(self.policy, val_reward)
+        val_rewards = self._get_global_validation_rewards()
+        self.baseline.epoch_callback(self.policy, val_rewards[self.monitor_instance])

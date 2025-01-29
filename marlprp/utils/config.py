@@ -62,10 +62,10 @@ class BaseEnvParams:
             log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
             self.max_supply = None
 
-        if self.num_agents is None:
-            # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
-            # (i.e. everything has been collected)
-            self.always_mask_depot = True
+        # if self.num_agents is None:
+        #     # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
+        #     # (i.e. everything has been collected)
+        #     self.always_mask_depot = True
 
         if self.goal is None:
             if self.num_agents is None or self.num_agents == 1:
@@ -110,13 +110,12 @@ class EnvParams(BaseEnvParams):
 
 class EnvParamList:
     
-    def __init__(self, param_list: List[EnvParams] = [], probs = None):
+    def __init__(self, param_list: List[EnvParams] = []):
         self.envs = param_list
         self.name = "msprp"
         self.id = "multi_instance"
         self.always_mask_depot: bool = False
         self.is_multiinstance: bool = True    
-        self.generator_probs = probs
 
     def append(self, item):
         self.envs.append(item)
@@ -133,6 +132,15 @@ class EnvParamList:
     def num_agents(self):
         return self.envs[0].num_agents
     
+    @classmethod
+    def initialize(cfg, env_params: dict):
+        param_list = []
+        for params in env_params.values():
+            params = EnvParams.initialize(**params)
+            param_list.append(params)
+        return cfg(param_list)
+    
+
     def __len__(self):
         # Returns the length of the list
         return len(self.envs)
@@ -302,6 +310,8 @@ class TrainingParams:
     warmup_epochs: int = None
 
     seed: int = 1234567
+
+    monitor_instance: str = None  # instance used for monitoring
 
     def __post_init__(self):
         self.n_devices = len(self.devices)

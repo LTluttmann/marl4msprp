@@ -43,16 +43,11 @@ class DistributableSynetheticDataset(Dataset):
             self, 
             env: MSPRPEnv,
             num_samples: int, 
-            current_epoch: int,
-            max_epochs: int,
             **kwargs
         ) -> None:
         
         super().__init__()
-        self.current_epoch = current_epoch
-        self.max_epochs = max_epochs
         self.num_samples = num_samples 
-
         self.datasets = {g.id: g(batch_size=num_samples) for g in env.generators}
 
     def __len__(self):
@@ -89,7 +84,7 @@ class InstanceFilesDataset(Dataset):
 
     def collate_fn(self, batch):
         td = torch.stack(batch, 0)
-        return td
+        return td, None
 
 
 
@@ -98,29 +93,28 @@ class SequentialSampler(Sampler[int]):
     def __init__(
             self, 
             data_source: DistributableSynetheticDataset,
-            epoch: int, 
-            max_epochs: int,
+            batch_size: int,
+            dataset_distribution = None,
         ) -> None:
+
+        self.batch_size = batch_size
         self.datasets = data_source.datasets
         self.dataset_indices = list(self.datasets.keys())
-        self.epoch = epoch
-        self.max_epochs = max(1, max_epochs - 10)
+        self.dataset_distribution = dataset_distribution
 
-        self.init_dist = np.array([1.] + [0.] * (len(self.dataset_indices) - 1), dtype=float)
-        self.tgt_dist = np.array([1 / len(self.dataset_indices)] * len(self.dataset_indices), dtype=float)
 
     def __iter__(self):
-        dataset_idx = np.random.choice(self.dataset_indices, p=self.generator_distribution)
-        indices = list(range(len(self.datasets[dataset_idx])))
-        yield from [(dataset_idx, i) for i in indices]
+        sampler_iter = iter(range(len(self)))
+        while True:
+            try:
+                dataset_idx = np.random.choice(self.dataset_indices, p=self.dataset_distribution)
+                batch = [next(sampler_iter) for _ in range(self.batch_size)]
+                yield from [(dataset_idx, i) for i in batch]
+            except StopIteration:
+                break
 
     def __len__(self) -> int:
-        return min([len(x) for x in self.datasets]) 
-
-    @property
-    def generator_distribution(self):
-        step_t = self.epoch / self.max_epochs
-        return (1-step_t) * self.init_dist + step_t * self.tgt_dist
+        return min([len(x) for x in self.datasets.values()]) 
 
 
     
@@ -136,8 +130,7 @@ class EnvLoader(DataLoader):
         sampler = None,
         batch_sampler = None,
         mode: str = "train",
-        epoch: int = 0,
-        max_epochs: int = None,
+        dataset_distribution = None,
         **kwargs
     ) -> None:
 
@@ -156,13 +149,11 @@ class EnvLoader(DataLoader):
             dataset = DistributableSynetheticDataset(
                 env=env,
                 num_samples=dataset_size,
-                current_epoch=epoch,
-                max_epochs=max_epochs,
                 **kwargs
             )
             if sampler is not None:
                 raise ValueError("passing sampler externally not implemented yet")
-            sampler = SequentialSampler(dataset, epoch, max_epochs)
+            sampler = SequentialSampler(dataset, batch_size, dataset_distribution)
             super().__init__(
                 dataset=dataset, 
                 batch_size=batch_size,

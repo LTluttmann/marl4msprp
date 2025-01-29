@@ -68,11 +68,9 @@ def get_trainer(
 @hydra.main(version_base=None, config_path="../configs/", config_name="main")
 @hydra_run_wrapper
 def main(cfg: DictConfig):
-    if hasattr(cfg, "env_list"):
-        instance_params = EnvParamList()
-        for params in cfg.env_list.values():
-            params = EnvParams.initialize(**params)
-            instance_params.append(params)
+    env_list = getattr(cfg, "env_list", None)
+    if env_list is not None:
+        instance_params = EnvParamList.initialize(env_list)
     else:
         instance_params = EnvParams.initialize(**cfg.env)
     train_params = TrainingParams(**cfg.train)

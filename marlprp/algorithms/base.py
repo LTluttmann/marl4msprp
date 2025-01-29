@@ -1,7 +1,9 @@
 import os
 import math
 import copy
+import numpy as np
 from omegaconf import ListConfig
+from collections import defaultdict
 from rich.logging import RichHandler
 from typing import Dict, Type, Any, Union
 
@@ -75,7 +77,9 @@ class LearningAlgorithm(LightningModule):
         self.env = env
         self.policy = policy
 
-        self.validation_step_rewards = []
+        self.instance_ids = [g.id for g in self.env.generators]
+        self.monitor_instance = train_params.monitor_instance or self.instance_ids[0]
+        self.validation_step_rewards = defaultdict(list) # {g.id: [] for g in self.env.generators}
 
         self.val_set_names = ["synthetic"]
         self.test_set_names = ["synthetic"]
@@ -172,8 +176,11 @@ class LearningAlgorithm(LightningModule):
         val_set_name = self.val_set_names[dataloader_idx]
 
         if val_set_name == "synthetic":
-            self.validation_step_rewards.append(reward)
-            metric_name = "val/reward"
+            self.validation_step_rewards[instance_id].append(reward)
+            if instance_id == self.monitor_instance:
+                metric_name = f"val/reward"
+            else:
+                metric_name = f"val/reward/{instance_id}"
         else:
             metric_name = f"val/{val_set_name}/reward"
 
@@ -189,6 +196,7 @@ class LearningAlgorithm(LightningModule):
     
     # PyTorch Lightning's built-in test_step method
     def test_step(self, batch, batch_idx, dataloader_idx=0):
+        batch, _ = batch
         state = self.env.reset(batch)
         test_reward = self.policy(state, self.env)["reward"]
         test_set_name = self.test_set_names[dataloader_idx]
@@ -260,8 +268,7 @@ class LearningAlgorithm(LightningModule):
             dataset_size=params.dataset_size,
             reload_every_n=1,
             mode="val",
-            epoch=self.current_epoch,
-            max_epochs=self.trainer.max_epochs,
+            dataset_distribution=self.generator_distribution,
         )
 
         return dataloader
@@ -273,8 +280,7 @@ class LearningAlgorithm(LightningModule):
             dataset_size=self.train_params.dataset_size,
             reload_every_n=1,
             mode="train",
-            epoch=self.current_epoch,
-            max_epochs=self.trainer.max_epochs,
+            dataset_distribution=self.generator_distribution
         )
     
     def val_dataloader(self):
@@ -305,23 +311,28 @@ class LearningAlgorithm(LightningModule):
         decoding_strategy = decoding_params.pop("decoding_strategy")
         self.policy.set_decode_type(decoding_strategy, **decoding_params)
 
-    def _get_global_validation_reward(self):
+    def _get_global_validation_rewards(self):
         # Stack the performance metrics on this GPU (without computing the mean yet)
-        local_val_rewards = torch.cat(self.validation_step_rewards, dim=0)
+        avg_val_rewards = {}
+        for instance, val_step_rewards in self.validation_step_rewards.items():
+            local_val_rewards = torch.cat(val_step_rewards, dim=0)
 
-        if self.world_size > 1:
-            all_val_rewards = all_gather_w_padding(local_val_rewards, self.world_size)
-            # Concatenate all the gathered performance tensors into one global tensor
-            all_val_rewards = torch.cat(all_val_rewards, dim=0)
-        else:
-            # If using a single GPU, the global performance tensor is just the local tensor
-            all_val_rewards = local_val_rewards
+            if self.world_size > 1:
+                all_val_rewards = all_gather_w_padding(local_val_rewards, self.world_size)
+                # Concatenate all the gathered performance tensors into one global tensor
+                all_val_rewards = torch.cat(all_val_rewards, dim=0)
+            else:
+                # If using a single GPU, the global performance tensor is just the local tensor
+                all_val_rewards = local_val_rewards
 
-        # Compute the average performance across all GPUs (or just this one if single GPU)
-        epoch_average = all_val_rewards.mean()
-        # Reset the list for the next validation epoch
-        self.validation_step_rewards.clear()
-        return epoch_average
+            # Compute the average performance across all GPUs (or just this one if single GPU)
+            epoch_average = all_val_rewards.mean().item()
+            # Reset the list for the next validation epoch
+            self.validation_step_rewards[instance].clear()
+            avg_val_rewards[instance] = epoch_average
+
+        self.validation_step_rewards = defaultdict(list)
+        return avg_val_rewards
 
     def on_train_epoch_start(self) -> None:
         self.train()
@@ -341,10 +352,14 @@ class LearningAlgorithm(LightningModule):
             return
 
         self._update_params()
-        epoch_average = self._get_global_validation_reward().item()
+        epoch_averages = self._get_global_validation_rewards()
         if hasattr(self, "reduce_on_plateau"):
-            self.reduce_on_plateau.step(epoch_average)
-        return epoch_average
+            self.reduce_on_plateau.step(epoch_averages[self.monitor_instance])
+        return epoch_averages
+
+    @property
+    def generator_distribution(self):
+        return None
 
 
 class ManualOptLearningAlgorithm(LearningAlgorithm):
@@ -371,11 +386,11 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
 
     # @monitor_lr_changes
     def on_validation_epoch_end(self):
-        epoch_average = super().on_validation_epoch_end()
+        epoch_averages = super().on_validation_epoch_end()
         # update learning rate schedulers
         scheduler = self.lr_schedulers()
         scheduler.step()
-        return epoch_average
+        return epoch_averages
 
     def manual_opt_step(self, loss) -> None:
         opt = self.optimizers()
@@ -450,6 +465,14 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             num_buffer_sampled=1
         )
 
+        self.init_dist = np.array([1.] + [0.] * (len(self.env.generators) - 1), dtype=float)
+        self.tgt_dist = np.array([1 / len(self.env.generators)] * len(self.env.generators), dtype=float)
+        
+    @property
+    def generator_distribution(self):
+        step_t = self.current_epoch / max(1, self.trainer.max_epochs - 10)
+        return (1-step_t) * self.init_dist + step_t * self.tgt_dist
+
 
     @property
     def rb_size(self):
@@ -469,7 +492,7 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
 
     @property
     def rollout_batch_size(self):
-        return min(self.train_batch_size, self._rollout_batch_size)
+        return self._rollout_batch_size
     
     @rollout_batch_size.setter
     def rollout_batch_size(self, value):
@@ -496,6 +519,8 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             top_p=self.train_params.decoding["top_p"],
             temperature=self.ref_model_temp
         )  
+
+
 
 
 class EvalModule(LearningAlgorithm):

@@ -6,9 +6,9 @@ defaults:
   - logger: wandb
   - paths: default.yaml
   - env: 10s-3i-20p
-  # - env_list: default.yaml
   - model: sl
   - policy: null
+  - env_list: null
 
 run_name: ${env.id}
 
