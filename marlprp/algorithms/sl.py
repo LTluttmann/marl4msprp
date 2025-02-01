@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from tensordict import TensorDict
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.ops import batchify, unbatchify
 from marlprp.algorithms.model_args import SelfLabelingParameters
 from marlprp.algorithms.base import LearningAlgorithmWithReplayBuffer
@@ -22,7 +22,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: SelfLabelingParameters,
         train_params: TrainingParams,
@@ -103,12 +103,15 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         batch, instance_id = batch
         orig_state = self.env.reset(batch)
         bs = orig_state.size(0)
+
         if isinstance(self.rollout_batch_size, (dict, DictConfig)):
             rollout_batch_size = self.rollout_batch_size.get(instance_id, self.train_batch_size)
         else:
             rollout_batch_size = self.rollout_batch_size
-        train_rewards = []
+
+        avg_steps = []
         reward_std = []
+        train_rewards = []
         # data gathering loop
         for i in range(0, bs, rollout_batch_size):
 
@@ -138,7 +141,8 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
 
                 # add tensordict to buffer
                 state_stack.append(td)
-
+                if steps > 1000:
+                    raise ValueError()
             # (bs * #samples, #steps)
             state_stack = torch.cat(state_stack, dim=1)
             # (bs, #samples, #steps)
@@ -147,8 +151,10 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             rewards = self.env.get_reward(next_state, mode="train")
             # (bs, #samples)
             rewards = unbatchify(rewards, self.num_starts)
+            # store rollout results
             train_rewards.append(rewards.mean(1))
             reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
+            avg_steps.append((~state_stack["mask"]).sum(1).float().mean())
             # (bs)
             best_rew, best_idx = rewards.max(dim=1)
             # (bs)
@@ -164,9 +170,11 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.rbs[instance_id].extend(best_states)
             # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
 
+        avg_steps = torch.stack(avg_steps, 0).mean()
         reward_std = torch.cat(reward_std, 0).mean()
         train_reward = torch.cat(train_rewards, 0).mean()
-        self.log("train/reward_std", reward_std, on_epoch=True, sync_dist=True)
+        self.log("train/avg_steps", avg_steps, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/reward_std", reward_std, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/reward_mean", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
 
         if self.trainer.is_last_batch or self.update_after_every_batch:

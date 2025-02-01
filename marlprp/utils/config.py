@@ -62,11 +62,6 @@ class BaseEnvParams:
             log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
             self.max_supply = None
 
-        # if self.num_agents is None:
-        #     # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
-        #     # (i.e. everything has been collected)
-        #     self.always_mask_depot = True
-
         if self.goal is None:
             if self.num_agents is None or self.num_agents == 1:
                 self.goal = "min-sum"
@@ -106,6 +101,16 @@ class EnvParams(BaseEnvParams):
             num_storage_locations=self.num_storage_locations
         )
         self.size = (self.num_shelves + self.num_depots) * self.num_skus
+
+@dataclass(kw_only=True)
+class AREnvParams(EnvParams):
+    name: str = "ar"
+
+
+@dataclass(kw_only=True)
+class SAEnvParams(EnvParams):
+    name: str = "sa"
+
 
 
 class EnvParamList:

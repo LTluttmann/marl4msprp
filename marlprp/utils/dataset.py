@@ -4,14 +4,14 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import Sampler
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 
 
 
 class SynetheticDataset(Dataset):
     def __init__(
             self, 
-            env: MSPRPEnv,
+            env: MultiAgentEnv,
             batch_size: int, 
             num_samples: int, 
             drop_last: bool = False,
@@ -41,7 +41,7 @@ class SynetheticDataset(Dataset):
 class DistributableSynetheticDataset(Dataset):
     def __init__(
             self, 
-            env: MSPRPEnv,
+            env: MultiAgentEnv,
             num_samples: int, 
             **kwargs
         ) -> None:
@@ -121,7 +121,7 @@ class SequentialSampler(Sampler[int]):
 class EnvLoader(DataLoader):
     def __init__(
         self, 
-        env: MSPRPEnv = None, 
+        env: MultiAgentEnv = None, 
         batch_size: int = 1,
         dataset_size: int = None,
         path: str = None,
@@ -210,7 +210,7 @@ def read_luttmann(path, num_agents):
     num_agents = max_num_agents
     current_location = td["current_location"].repeat(1, num_agents)
     capacity = td["init_capacity"].repeat(1, num_agents)
-
+    capacity[agent_pad_mask] = 0
     td.update({
         "init_capacity": capacity,
         "current_location": current_location,

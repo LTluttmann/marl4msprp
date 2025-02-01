@@ -2,10 +2,10 @@ import os
 import time
 import torch
 import pyrootutils
-import numpy as np
+from functools import partial
 from marlprp.utils.ops import batchify, unbatchify, gather_by_index
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
@@ -28,7 +28,10 @@ NUM_ITERS = 100
 
 def random__shelf_pointer(embeddings, state: MSPRPState, attn_mask = None):
     agent_coordinates = gather_by_index(state.coordinates, state.current_location, dim=1)
+    # scale probs of visiting a node according to its negative distance
     logits = -torch.cdist(agent_coordinates, state.coordinates)
+    # increase prob of longer tour to return to depot
+    logits[..., :state.num_depots] += (state.tour_length - state.tour_length.max(1, keepdim=True).values)[..., None]
     return logits
 
 
@@ -36,7 +39,10 @@ def random__sku_pointer(embeddings, state: MSPRPState, attn_mask = None):
     bs = state.size(0)
     num_agents = state.num_agents
     num_skus = state.num_skus
-    return torch.rand((bs, num_agents, num_skus+1))
+    supply_at_agent_loc = state.supply_w_depot_and_dummy.gather(1, state.current_location[..., None].expand(bs, num_agents, num_skus+1))
+    min_pickable = torch.minimum(supply_at_agent_loc, state.demand_w_dummy[:, None])
+    min_pickable = torch.minimum(min_pickable, state.remaining_capacity[..., None])
+    return min_pickable  # torch.rand((bs, num_agents, num_skus+1))
     
 
 class RandomHierarchicalPolicy(HierarchicalMultiAgentDecoder):
@@ -52,20 +58,20 @@ class RandomHierarchicalPolicy(HierarchicalMultiAgentDecoder):
 def get_random_baseline(instance_path):
     
     solution_path=os.path.join(instance_path, "td_data.pth")
-    env_params = EnvParams(always_mask_depot=True, goal="min-max")
-    env = MSPRPEnv(env_params)
+    env_params = EnvParams(num_agents=None, goal="min-max")
+    env = MultiAgentEnv(env_params)
     dl = EnvLoader(
         env, 
         batch_size=1, 
         path=solution_path,
-        read_fn=read_luttmann
+        read_fn=partial(read_luttmann, num_agents=None)
     )
 
     model_params = MahamParams(policy="random", env=env_params, decoder_attn_mask=True)
     random_policy = RandomHierarchicalPolicy(model_params)
 
     rewards = []
-    for td in dl:
+    for td, _ in dl:
         state = env.reset(td)
         state = batchify(state, NUM_ITERS)
         i = 0

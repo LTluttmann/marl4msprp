@@ -16,7 +16,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from rl4co.utils.optim_helpers import create_scheduler
 from torchrl.data.replay_buffers import ReplayBufferEnsemble
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.utils import monitor_lr_changes
 from marlprp.utils.logger import get_lightning_logger
@@ -53,7 +53,7 @@ class LearningAlgorithm(LightningModule):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: RoutingPolicy,
         model_params: ModelParams,
         train_params: TrainingParams,
@@ -112,7 +112,7 @@ class LearningAlgorithm(LightningModule):
     @classmethod
     def initialize(
         cls,
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: ModelParams,
         train_params: TrainingParams,
@@ -147,7 +147,7 @@ class LearningAlgorithm(LightningModule):
             assert model_params.policy.policy == model_params_ckpt.policy.policy, \
             "Policy of checkpoint and the one specified in new model parameters diverge."
 
-        env = MSPRPEnv.initialize(params=env_params, multiagent=model_params.policy.is_multiagent_policy)
+        env = MultiAgentEnv.initialize(params=env_params, multiagent=model_params.policy.is_multiagent_policy)
         policy = RoutingPolicy.initialize(params=model_params.policy)
 
         Algorithm = model_registry[model_params.algorithm]
@@ -365,7 +365,7 @@ class LearningAlgorithm(LightningModule):
 class ManualOptLearningAlgorithm(LearningAlgorithm):
     def __init__(
             self, 
-            env: MSPRPEnv, 
+            env: MultiAgentEnv, 
             policy: RoutingPolicy, 
             model_params: ModelParams, 
             train_params: TrainingParams, 
@@ -409,7 +409,7 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
 class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: ModelWithReplayBufferParams,
         train_params: TrainingParams,
@@ -521,14 +521,13 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         )  
 
 
-
-
 class EvalModule(LearningAlgorithm):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: RoutingPolicy,
+        model_params: ModelParams,
         test_params: TestParams
     ) -> None:
         
@@ -537,6 +536,7 @@ class EvalModule(LearningAlgorithm):
         self.env = env
         self.policy = policy
         self.test_params = test_params
+        self.model_params = model_params
         self.test_set_names = ["synthetic"]
 
     def training_step(self, batch, batch_idx):
@@ -544,26 +544,3 @@ class EvalModule(LearningAlgorithm):
     
     def validation_step(self, batch, batch_idx):
         raise NotImplementedError("validation_step not defined for eval module")
-        
-    @classmethod
-    def init_from_checkpoint(cls, test_params: TestParams, env_params = None, policy_cfg = None):
-        assert test_params.checkpoint is not None
-        ckpt = torch.load(test_params.checkpoint)
-        model_params = ckpt["hyper_parameters"]["model_params"]
-        policy_params = model_params.policy
-        env_params = env_params if env_params is not None else policy_params.env
-        policy_params.env = env_params
-        if policy_cfg is not None:
-            policy_params.__dict__.update(policy_cfg)
-
-        env = MSPRPEnv(params=env_params)
-        policy = RoutingPolicy.initialize(policy_params)
-
-        policy_state_dict = {
-            k[len("policy."):]: v 
-            for k,v in ckpt["state_dict"].items() 
-            if k.startswith("policy.")
-        }
-        policy.load_state_dict(policy_state_dict)   
-        
-        return cls(env, policy, test_params), model_params

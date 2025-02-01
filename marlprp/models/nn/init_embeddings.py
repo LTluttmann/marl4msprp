@@ -3,14 +3,19 @@ import torch.nn as nn
 
 from marlprp.utils.ops import min_max_scale
 from marlprp.env.instance import MSPRPState
+from marlprp.models.nn.misc import PositionalEncoding
 from marlprp.models.policy_args import PolicyParams, TransformerParams
+
 
 def get_init_emb_layer(params: PolicyParams):
     init_emb_map = {
-        "msprp": MultiAgentInitEmbedding
+        "ham": MultiAgentInitEmbedding,
+        "maham": MultiAgentInitEmbedding,
+        "2dptr": MultiAgentInitEmbedding,
+        "et": EquityTransformerInitEmbedding,
     }
 
-    emb_cls = init_emb_map[params.env.name]
+    emb_cls = init_emb_map[params.policy]
     init_emb_layer = emb_cls(params)
     return init_emb_layer
 
@@ -78,3 +83,27 @@ class MultiAgentInitEmbedding(nn.Module):
 
         node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
         return node_emb, sku_emb, edge_emb
+
+
+class EquityTransformerInitEmbedding(MultiAgentInitEmbedding):
+    def __init__(self, policy_params: TransformerParams):
+        super(EquityTransformerInitEmbedding, self).__init__(policy_params)
+        self.pe = PositionalEncoding(embed_dim=policy_params.embed_dim)
+        self.agent_proj = nn.Linear(1, policy_params.embed_dim, bias=False)
+
+    def _init_agent_embed(self, tc: MSPRPState, depot_emb): 
+        bs, num_agents = tc.remaining_capacity.shape
+        agent_emb = depot_emb.clone().expand(bs, num_agents, -1)
+        agent_order = torch.arange(0, num_agents, device=tc.device).view(1, num_agents).expand(bs, num_agents)
+        agent_emb = self.pe(agent_emb, agent_order)
+        return agent_emb
+
+    def forward(self, tc: MSPRPState):
+        assert tc.num_depots == 1, "ET only implemented for single depot instances yet"
+        depot_emb = self._init_depot_embed(tc)
+        shelf_emb = self._init_shelf_embed(tc)
+        sku_emb = self._init_sku_embed(tc)
+        edge_emb = self._init_edge_embed(tc)
+        agent_emb = self._init_agent_embed(tc, depot_emb)
+        node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
+        return node_emb, sku_emb, edge_emb, agent_emb

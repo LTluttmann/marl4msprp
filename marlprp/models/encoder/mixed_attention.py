@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.nn.modules.transformer import _get_activation_fn
 import math
 from einops import rearrange
-from marlprp.models.policy_args import MatNetParams
+from marlprp.models.policy_args import TransformerParams
 
 
 def apply_weights_and_combine(
@@ -41,7 +41,7 @@ def apply_weights_and_combine(
 
 
 class MixedScoreFF(nn.Module):
-    def __init__(self, params: MatNetParams) -> None:
+    def __init__(self, params: TransformerParams) -> None:
         super().__init__()
         num_heads = params.num_heads
         ms_hidden_dim = params.ms_hidden_dim
@@ -78,7 +78,7 @@ class MixedScoreFF(nn.Module):
 
 
 class EfficientMixedScoreMultiHeadAttention(nn.Module):
-    def __init__(self, model_params: MatNetParams):
+    def __init__(self, model_params: TransformerParams):
         super().__init__()
 
         embed_dim = model_params.embed_dim

@@ -3,7 +3,7 @@ from typing import Tuple
 from collections import defaultdict
 from tensordict.tensordict import TensorDict
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.ops import unbatchify
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.logger import get_lightning_logger
@@ -65,7 +65,7 @@ class DecodingStrategy:
         self, 
         state: MSPRPState, 
         embeddings: MatNetEncoderOutput, 
-        env: MSPRPEnv
+        env: MultiAgentEnv
     ):
         """called by models, that encode every step. This hook is called before the encoder"""
         self.setup()
@@ -80,7 +80,7 @@ class DecodingStrategy:
         a complete solution"""
         ...
 
-    def post_decoder_hook(self, state: MSPRPState, env: MSPRPEnv):
+    def post_decoder_hook(self, state: MSPRPState, env: MultiAgentEnv):
         """called by all models after a full solution is obtained"""
         def stack_and_gather_logp(logp, actions):
             assert (
@@ -134,7 +134,7 @@ class DecodingStrategy:
 
         return selected_actions, logp
 
-    def _select_best_start(self, logp, actions, state: MSPRPState, env: MSPRPEnv):
+    def _select_best_start(self, logp, actions, state: MSPRPState, env: MultiAgentEnv):
         aug_batch_size = logp.size(0)  # num nodes
         batch_size = aug_batch_size // self.num_starts
         rewards = env.get_reward(state)

@@ -2,7 +2,7 @@ import abc
 import torch.nn as nn
 from tensordict import TensorDict
 from marlprp.utils.ops import batchify
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.config import ModelParams
 from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
@@ -21,7 +21,7 @@ class BaseDecoder(nn.Module, metaclass=abc.ABCMeta):
             embeddings = batchify(embeddings, self.dec_strategy.num_starts)
         return state, embeddings
 
-    def post_forward_hook(self, state: MSPRPState, env: MSPRPEnv):
+    def post_forward_hook(self, state: MSPRPState, env: MultiAgentEnv):
         logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
         return logps, actions, state
 

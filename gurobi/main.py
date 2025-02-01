@@ -24,7 +24,8 @@ def main(cfg: DictConfig):
     test_file_dls = get_file_dataloader(
         env=None,
         batch_size=1, 
-        file_dir=test_params.data_dir
+        file_dir=test_params.data_dir,
+        num_agents=None
     )["luttmann"]
                 
     solutions = {}

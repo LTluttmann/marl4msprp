@@ -2,10 +2,10 @@ import os
 import time
 import torch
 import pyrootutils
-import numpy as np
+from functools import partial
 from marlprp.utils.ops import batchify, unbatchify
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
@@ -54,20 +54,20 @@ class RandomHierarchicalPolicy(HierarchicalMultiAgentDecoder):
 def get_random_baseline(instance_path):
     
     solution_path=os.path.join(instance_path, "td_data.pth")
-    env_params = EnvParams(always_mask_depot=True, goal="min-max")
-    env = MSPRPEnv(env_params)
+    env_params = EnvParams(num_agents=None, goal="min-max")
+    env = MultiAgentEnv(env_params)
     dl = EnvLoader(
         env, 
         batch_size=1, 
         path=solution_path,
-        read_fn=read_luttmann
+        read_fn=partial(read_luttmann, num_agents=None)
     )
 
     model_params = MahamParams(policy="random", env=env_params, decoder_attn_mask=True)
     random_policy = RandomHierarchicalPolicy(model_params)
 
     rewards = []
-    for td in dl:
+    for td, _ in dl:
         state = env.reset(td)
         state = batchify(state, NUM_ITERS)
         i = 0

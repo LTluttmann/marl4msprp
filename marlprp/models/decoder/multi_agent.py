@@ -8,7 +8,7 @@ from einops import reduce, rearrange
 from tensordict import TensorDict, pad
 from typing import TypedDict, Tuple, List
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
 from marlprp.utils.ops import gather_by_index, batchify
@@ -40,14 +40,14 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         self.shelf_decoder = MultiAgentShelfDecoder(model_params)
         self.sku_decoder = MultiAgentSkuDecoder(model_params)
 
-    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MSPRPEnv, return_logp = False):
+    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MultiAgentEnv, return_logp = False):
         node_mask = env.get_node_mask(state)
         next_shelves, shelf_logps = self.shelf_decoder(embeddings, state, node_mask, env)
 
         # partial step through the environment to get intermediate state s'
         intermediate_state = env.step(next_shelves, state)
         # get new action mask from intermediate state
-        sku_mask = env.get_sku_mask(intermediate_state, next_shelves["shelf"])
+        sku_mask = env.get_sku_mask(intermediate_state, next_shelves)
         skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, sku_mask, env)
 
         # handle conflicts
@@ -139,7 +139,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         embeddings: MatNetEncoderOutput, 
         state: MSPRPState,
         mask: torch.Tensor,
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
     ):
         num_agents = state.num_agents
         # get logits and mask
@@ -161,7 +161,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
             logps.append(logp)
             busy_agents.append(action["agent"])
 
-            mask = self._update_mask(mask, actions, state, busy_agents)
+            mask = self._update_mask(mask, actions, state, busy_agents, env)
 
         # maybe pad to ensure all action buffers to have the same size
         n_active_agents = len(actions)
@@ -188,18 +188,14 @@ class BaseMultiAgentDecoder(BaseDecoder):
     def get_attn_mask(self, state, env):
         return None
 
+
     @abc.abstractmethod
-    def _logits_to_logp(self, logits, mask) -> Tuple[Tensor, Tensor]:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list, env) -> Tensor:
         pass
 
 
     @abc.abstractmethod
-    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list) -> Tensor:
-        pass
-
-
-    @abc.abstractmethod
-    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MultiAgentEnv) -> MultiAgentAction:
         pass
 
 
@@ -294,7 +290,7 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
         self.use_attn_mask = params.decoder_attn_mask
 
-    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MultiAgentEnv) -> MultiAgentAction:
         # translate and store action
         selected_agent = action_idx % state.num_agents
         selected_shelf = action_idx // state.num_agents
@@ -309,7 +305,7 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         )
         return action
     
-    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state, busy_agents: list, env: MultiAgentEnv) -> Tensor:
         action = actions[-1]
 
         bs, num_agents, num_nodes = mask.shape
@@ -323,16 +319,37 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             selected_shelf.view(bs, 1, 1).expand(-1, num_agents, 1), 
             True
         )[..., state.num_depots:]
-        # okay now it gets wild. We have to make sure all idle agents can select some action. Therefore, we first need to determine 
-        # which idle agents have no feasible action left (since all their feasible nodes were selected already)
+
+        if not env.is_multitour_instance:
+            # in case of "one tour per agent" instanes (i.e. num_agents=None), an agent may only return to the depot if
+            # all other active agents have enough capacity to pick all remaining items. If one agent returns to the depot,
+            # we need to recalculate whether the other agents can handle the remaining demand 
+            actions = torch.stack(actions, dim=-1)
+            depot_selected = actions["shelf"].lt(state.num_depots)
+            remaining_capacity = state.remaining_capacity.clone()
+            going_to_depot = torch.full_like(state.agent_at_depot(), fill_value=False)
+            going_to_depot.scatter_add_(1, actions["agent"], depot_selected)
+            remaining_capacity.masked_fill_(going_to_depot, 0)
+            remaining_capacity_expanded = remaining_capacity.unsqueeze(1).repeat(1, state.num_agents, 1)
+            mask = torch.eye(state.num_agents, device=state.device).bool().unsqueeze(0).expand_as(remaining_capacity_expanded)
+            # (bs, num_agents)
+            capacity_of_other_agents = remaining_capacity_expanded.masked_fill(mask, 0).sum(-1)
+            remaining_demand = state.demand.sum(-1, keepdim=True)
+            mask_depot = capacity_of_other_agents.lt(remaining_demand) & remaining_demand.gt(0)
+            # (bs, num_agents ,num_depots)
+            mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
+            updated_mask[..., :state.num_depots] = mask_depot
+        # We have to make sure all idle agents can select some action. Therefore, we first need to determine 
+        # which idle agents have no feasible action left (since all their feasible nodes were selected already)...
         no_action_left = updated_mask.all(-1)
+        # and then we let these agents wait at their current location
         updated_mask[no_action_left] = ~state.current_loc_ohe[no_action_left].bool()
-        # updated_mask[..., :state.num_depots] = mask[..., :state.num_depots]
+        # all actions of busy agents are masked
         updated_mask = updated_mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_nodes), True)
 
         return updated_mask
     
-    def get_attn_mask(self, state: MSPRPState, env: MSPRPEnv):
+    def get_attn_mask(self, state: MSPRPState, env: MultiAgentEnv):
         # in F.scaled_dot_product_attn, True mean "attend", False means not attend
         if self.use_attn_mask:  
             return ~env.get_node_mask(state)
@@ -348,7 +365,7 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         self.use_attn_mask = params.decoder_attn_mask
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
 
-    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MSPRPEnv) -> MultiAgentAction:
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MultiAgentEnv) -> MultiAgentAction:
         batch_idx = torch.arange(action_idx.size(0), device=action_idx.device)
         # translate and store action
         selected_agent = action_idx % state.num_agents
@@ -370,7 +387,7 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
         )
         return action
     
-    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list) -> Tensor:
+    def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list, env) -> Tensor:
         bs, n_agents, n_jobs = mask.shape
 
         busy_agents = torch.stack(busy_agents, dim=1)
@@ -395,7 +412,7 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
 
         return mask
 
-    def get_attn_mask(self, state: MSPRPState, env: MSPRPEnv):
+    def get_attn_mask(self, state: MSPRPState, env: MultiAgentEnv):
         # omit dummy item mask
         # in F.scaled_dot_product_attn, True mean "attend", False means not attend
         if self.use_attn_mask:  

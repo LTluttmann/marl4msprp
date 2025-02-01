@@ -1,7 +1,7 @@
 # @package _global_
 policy:
-  policy: maham
-
+  policy: ham
+  
 env:
   name: msprp
-  num_agents: null
+  num_agents: 1

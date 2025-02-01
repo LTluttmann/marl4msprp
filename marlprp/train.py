@@ -8,7 +8,7 @@ from rl4co.utils.trainer import RL4COTrainer
 from rl4co.utils import instantiate_callbacks
 from hydra.core.hydra_config import HydraConfig
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv, AREnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.logger import get_lightning_logger
 from marlprp.algorithms.base import LearningAlgorithm
@@ -42,7 +42,9 @@ def get_trainer(
     if cfg.get("logger", None) is not None:
         log.info("Instantiating loggers...")
         logger = get_wandb_logger(cfg, model_params, hc, model)
-
+    else:
+        logger = None
+        
     devices = train_params.devices
     log.info(f"Running job on GPU with ID {', '.join([str(x) for x in devices])}")
     log.info("Instantiating trainer...")
@@ -94,7 +96,7 @@ def main(cfg: DictConfig):
 
         policy_params = PolicyParams.initialize(env=instance_params, **cfg.policy)
         model_params = ModelParams.initialize(policy_params=policy_params, **cfg.model)
-        env = MSPRPEnv(params=instance_params)
+        env = MultiAgentEnv.initialize(params=instance_params)
         policy = RoutingPolicy.initialize(policy_params)
        
         model = LearningAlgorithm.initialize(

@@ -4,7 +4,7 @@ import pytest
 import torch.nn.functional as F
 from tensordict import TensorDict
 from einops import rearrange
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import EnvParams
 from marlprp.utils.dataset import EnvLoader, read_luttmann
 # @pytest.mark.parametrize("num_agents", [2])
@@ -81,7 +81,7 @@ from marlprp.utils.dataset import EnvLoader, read_luttmann
 def test_w_lt_instances(instance_path):
     
     solution_path=os.path.join(instance_path, "solution.pth")
-    env = MSPRPEnv(EnvParams())
+    env = MultiAgentEnv(EnvParams())
     dl = EnvLoader(
         env, 
         batch_size=1, 

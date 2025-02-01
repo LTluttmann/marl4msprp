@@ -11,6 +11,7 @@ defaults:
   - env_list: null
 
 run_name: ${env.id}
+model_name: ${model.algorithm}-${policy.policy}
 
 train:  
   train: true

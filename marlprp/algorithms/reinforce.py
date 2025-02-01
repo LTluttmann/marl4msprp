@@ -6,7 +6,7 @@ from marlprp.algorithms.baselines import Baseline, WarmupBaseline
 from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.algorithms.utils import RewardScaler
 from marlprp.algorithms.model_args import ReinforceParams
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import (
     TrainingParams, 
     ValidationParams, 
@@ -21,7 +21,7 @@ class REINFORCE(LearningAlgorithm):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: ReinforceParams,
         train_params: TrainingParams,

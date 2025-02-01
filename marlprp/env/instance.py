@@ -14,7 +14,7 @@ class MSPRPState:
     tour_length: torch.Tensor = None
     packing_items: torch.Tensor = None
     remaining_capacity: torch.Tensor = None
-    zero_units_taken: torch.Tensor = None
+    active_agent: torch.Tensor = None
 
     @classmethod
     def initialize(
@@ -27,7 +27,7 @@ class MSPRPState:
         agent_pad_mask: torch.Tensor = None,
         tour_length: torch.Tensor = None,
         packing_items: torch.Tensor = None,
-        zero_units_taken: torch.Tensor = None,
+        active_agent: torch.Tensor = None,
     ) -> "MSPRPState":
         batch_size = supply.size(0)
         return cls(
@@ -39,7 +39,7 @@ class MSPRPState:
             agent_pad_mask=agent_pad_mask,
             tour_length=tour_length,
             packing_items=packing_items,
-            zero_units_taken=zero_units_taken,
+            active_agent=active_agent,
             batch_size=[batch_size],
             device=supply.device
         )
@@ -69,8 +69,7 @@ class MSPRPState:
                 dtype=torch.bool,
                 device=self.device
             )
-        if self.zero_units_taken is None:
-            self.zero_units_taken = torch.zeros((*self.batch_size, self.num_agents), device=self.device)
+
 
     @property
     def capacity(self):
@@ -95,6 +94,10 @@ class MSPRPState:
     @property
     def num_agents(self):
         return self.current_location.size(-1)
+
+    @property
+    def num_valid_agents(self):
+        return (~self.agent_pad_mask).sum(1)
 
     @property
     def supply_w_depot(self):

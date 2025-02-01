@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.algorithms.model_args import PPOParams
 from marlprp.algorithms.base import ManualOptLearningAlgorithm
 from marlprp.algorithms.utils import RewardScaler, make_replay_buffer
@@ -20,7 +20,7 @@ class PPO(ManualOptLearningAlgorithm):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: PPOParams,
         train_params: TrainingParams,
