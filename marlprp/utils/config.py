@@ -47,14 +47,14 @@ class BaseEnvParams:
 
     capacity: int = 6
 
-    is_multi_instance: bool = field(init=False)
+    is_multi_instance: bool = False
     
     packing_ratio_penalty: float = 0.1
     zero_picks_penalty: float = 0.05
 
     always_mask_depot: bool = False
 
-    goal: str = "min-sum"
+    goal: str = None
 
     def __post_init__(self):
 
@@ -62,16 +62,14 @@ class BaseEnvParams:
             log.info("Warning! Set both, max_supply and supply_demand_ratio. I will ignore max_supply")
             self.max_supply = None
 
-        if self.num_agents is None:
-            # if num_agents is none, we have one picker per tour. Thus going to depot is only necessary when nothing else can be done
-            # (i.e. everything has been collected)
-            self.always_mask_depot = True
-
-        if self.num_agents is None or self.num_agents == 1:
-            self.goal = "min-sum"
-        else:
-            self.goal = "min-max"
-
+        if self.goal is None:
+            if self.num_agents is None or self.num_agents == 1:
+                self.goal = "min-sum"
+            else:
+                self.goal = "min-max"
+        
+        if self.id is None:
+            self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
 
     def __init_subclass__(cls, *args, **kw):
@@ -92,19 +90,66 @@ class BaseEnvParams:
 class EnvParams(BaseEnvParams):
     name: str = "msprp"
     num_skus: Union[List, int] = 3
+    size: int = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
-        if isinstance(self.num_shelves, int):
-            self.num_storage_locations = infer_num_storage_locations(
-                self.num_skus, 
-                self.num_shelves, 
-                avg_loc_per_sku=self.avg_loc_per_sku, 
-                num_storage_locations=self.num_storage_locations
-            )
-            self.is_multi_instance = False
-        else:
-            self.is_multi_instance = True
+        self.num_storage_locations = infer_num_storage_locations(
+            self.num_skus, 
+            self.num_shelves, 
+            avg_loc_per_sku=self.avg_loc_per_sku, 
+            num_storage_locations=self.num_storage_locations
+        )
+        self.size = (self.num_shelves + self.num_depots) * self.num_skus
+
+@dataclass(kw_only=True)
+class AREnvParams(EnvParams):
+    name: str = "ar"
+
+
+@dataclass(kw_only=True)
+class SAEnvParams(EnvParams):
+    name: str = "sa"
+
+
+
+class EnvParamList:
+    
+    def __init__(self, param_list: List[EnvParams] = []):
+        self.envs = param_list
+        self.name = "msprp"
+        self.id = "multi_instance"
+        self.always_mask_depot: bool = False
+        self.is_multiinstance: bool = True    
+
+    def append(self, item):
+        self.envs.append(item)
+
+    def __getitem__(self, index):
+        # Allows element access using indexing
+        return self.envs[index]
+
+    @property
+    def goal(self):
+        return self.envs[0].goal
+    
+    @property
+    def num_agents(self):
+        return self.envs[0].num_agents
+    
+    @classmethod
+    def initialize(cfg, env_params: dict):
+        param_list = []
+        for params in env_params.values():
+            params = EnvParams.initialize(**params)
+            param_list.append(params)
+        return cfg(param_list)
+    
+
+    def __len__(self):
+        # Returns the length of the list
+        return len(self.envs)
+
 
 
 @dataclass(kw_only=True)
@@ -117,7 +162,6 @@ class LargeEnvParams(BaseEnvParams):
 
 
 
-
 @dataclass(kw_only=True)
 class PolicyParams:
     policy: str
@@ -126,11 +170,11 @@ class PolicyParams:
     embed_dim: int = 256
     num_encoder_layers: int = 4
     dropout: float = 0.0
-    eval_multistep: bool = True # field(init=False)
-    eval_per_agent: bool = field(init=False)
+    eval_multistep: bool = True
+    eval_per_agent: bool = True
     # to be specified by the learning algorithm
     _use_critic: bool = False
-    _stepwise_encoding: bool = field(init=False)
+    _stepwise_encoding: bool = False
     is_multiagent_policy: bool = True
     max_steps: int = None
 
@@ -272,6 +316,8 @@ class TrainingParams:
 
     seed: int = 1234567
 
+    monitor_instance: str = None  # instance used for monitoring
+
     def __post_init__(self):
         self.n_devices = len(self.devices)
 
@@ -307,7 +353,6 @@ class ValidationParams:
             "top_p": self.top_p,
             "temperature": self.temperature,
             "num_decoding_samples": self.num_decoding_samples,
-            "store": True
         }
 
 @dataclass
@@ -329,6 +374,8 @@ class TestParams:
     checkpoint: str = None
     seed: int = 1234567
 
+    gurobi_timeout: int = 3600
+
     @property
     def decoding(self) -> dict:
         return {
@@ -337,5 +384,4 @@ class TestParams:
             "top_p": self.top_p,
             "temperature": self.temperature,
             "num_decoding_samples": self.num_decoding_samples,
-            "store": True
         }

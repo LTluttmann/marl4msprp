@@ -7,12 +7,11 @@ from marlprp.models.encoder.base import MatNetEncoderOutput
 
 
 def get_kvl_emb(params: MahamParams, key: str = None) -> "ShelfKVL":
-    emb_registry = {
-        "maham": {
-            "shelf": ShelfKVL,
-            "sku": SkuKVL,
-        }
+    kvl_layer = {
+        "shelf": ShelfKVL,
+        "sku": SkuKVL,
     }
+    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr", "parco"], kvl_layer)
     EmbCls = emb_registry[params.policy]
     
     if key is not None:
@@ -26,12 +25,11 @@ def get_dynamic_emb(params: MahamParams, key: str = None):
     if params.stepwise_encoding:
         return StaticEmbedding(params)
     
-    emb_registry = {
-        "maham": {
-            "shelf": ShelfDynEmb,
-            "sku": SkuDynEmb
-        }
+    dyn_emb = {
+        "shelf": ShelfDynEmb,
+        "sku": SkuDynEmb
     }
+    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr", "parco"], dyn_emb)
 
     EmbCls = emb_registry[params.policy]
     

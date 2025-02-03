@@ -13,3 +13,8 @@ class BaseEncoder(nn.Module, metaclass=abc.ABCMeta):
 class MatNetEncoderOutput(TypedDict):
     shelf: Tensor
     sku: Tensor
+
+class ETEncoderOutput(TypedDict):
+    shelf: Tensor
+    sku: Tensor
+    agent: Tensor

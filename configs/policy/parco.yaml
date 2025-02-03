@@ -1,0 +1,8 @@
+# @package _global_
+policy:
+  policy: parco
+
+env:
+  name: msprp
+  num_agents: null
+  goal: min-max

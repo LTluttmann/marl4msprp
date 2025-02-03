@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+from marlprp.env.env import MultiAgentEnv
+from marlprp.utils.ops import batchify
 from marlprp.utils.utils import Registry
-from marlprp.env.env import MSPRPEnv
 from marlprp.env.instance import MSPRPState
-from marlprp.models.encoder import MatNetEncoder
+from marlprp.models.encoder import MatNetEncoder, ETEncoder
 from marlprp.models.policy_args import PolicyParams
 from marlprp.models.decoder.base import BaseDecoder
-from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder
-
+from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder, HierarchicalParcoDecoder
+from marlprp.models.decoder.single_agent import HierarchicalSingleAgentDecoder, Hierarchical2dPtrDecoder
 
 policy_registry = Registry()
 
@@ -37,14 +38,15 @@ class RoutingPolicy(nn.Module):
     def forward(
             self, 
             state: MSPRPState, 
-            env: MSPRPEnv, 
+            env: MultiAgentEnv, 
             return_actions: bool = False
         ):
         # encoding once
         embeddings = self.encoder(state)
-        # pre decoding
-        state, embeddings = self.decoder.pre_decoding_hook(state, embeddings)
 
+        # pre decoding
+        state, embeddings = self.decoder.pre_forward_hook(state, embeddings)
+        
         while not state.done.all():
             # autoregressive decoding
             state = self.decoder(embeddings, state, env)["next"]
@@ -52,7 +54,7 @@ class RoutingPolicy(nn.Module):
                 embeddings = self.encoder(state)
 
         # gather all logps
-        log_ps, actions, state = self.decoder.post_decoding_hook(state, env)
+        log_ps, actions, state = self.decoder.post_forward_hook(state, env)
         # prepare return td
         return_dict = {
             "state": state,
@@ -65,8 +67,9 @@ class RoutingPolicy(nn.Module):
 
         return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
 
-    def act(self, state: MSPRPState, env: MSPRPEnv, return_logp: bool = True):
+    def act(self, state: MSPRPState, env: MultiAgentEnv, return_logp: bool = True):
         embeddings = self.encoder(state)
+        self.decoder.dec_strategy.setup()
         td = self.decoder(embeddings, state, env, return_logp=return_logp)
         return td
     
@@ -76,7 +79,7 @@ class RoutingPolicy(nn.Module):
         action_masks: TensorDict = td["action_mask"]
         # Encoder: get encoder output and initial embeddings from initial state
         embeddings = self.encoder(state)
-
+        self.decoder.dec_strategy.setup()
         # pred value via the value head
         if self.critic is not None:
             value_pred = self.critic(embeddings, state)
@@ -103,8 +106,48 @@ class RoutingPolicy(nn.Module):
 
 
 
+@policy_registry.register(name="ham")
+class SingleAgentPolicy(RoutingPolicy):
+
+    def __init__(self, model_params: PolicyParams):
+        super().__init__(model_params)  
+        self.encoder = MatNetEncoder(model_params)
+        self.decoder = HierarchicalMultiAgentDecoder(model_params)
+        self.critic = None
+
+
+@policy_registry.register(name="et")
+class EquityTransformerPolicy(RoutingPolicy):
+
+    def __init__(self, model_params: PolicyParams):
+        super().__init__(model_params)  
+        self.encoder = ETEncoder(model_params)
+        self.decoder = HierarchicalSingleAgentDecoder(model_params)
+        self.critic = None
+
+
+@policy_registry.register(name="2dptr")
+class TwoDPtrPolicy(RoutingPolicy):
+    def __init__(self, model_params: PolicyParams):
+        super().__init__(model_params)  
+        self.encoder = MatNetEncoder(model_params)
+        self.decoder = Hierarchical2dPtrDecoder(model_params)
+        self.critic = None
+
+
+
+@policy_registry.register(name="parco")
+class MultiAgentPolicy(RoutingPolicy):
+
+    def __init__(self, model_params: PolicyParams):
+        super().__init__(model_params)  
+        self.encoder = MatNetEncoder(model_params)
+        self.decoder = HierarchicalParcoDecoder(model_params)
+        self.critic = None
+
+
 @policy_registry.register(name="maham")
-class MatNetPolicy(RoutingPolicy):
+class MultiAgentPolicy(RoutingPolicy):
 
     def __init__(self, model_params: PolicyParams):
         super().__init__(model_params)  

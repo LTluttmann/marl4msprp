@@ -1,3 +1,8 @@
 # @package _global_
 policy:
   policy: maham
+
+env:
+  name: msprp
+  num_agents: null
+  goal: min-max

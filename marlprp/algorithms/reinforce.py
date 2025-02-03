@@ -6,7 +6,7 @@ from marlprp.algorithms.baselines import Baseline, WarmupBaseline
 from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.algorithms.utils import RewardScaler
 from marlprp.algorithms.model_args import ReinforceParams
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import (
     TrainingParams, 
     ValidationParams, 
@@ -21,7 +21,7 @@ class REINFORCE(LearningAlgorithm):
 
     def __init__(
         self, 
-        env: MSPRPEnv,
+        env: MultiAgentEnv,
         policy: nn.Module,
         model_params: ReinforceParams,
         train_params: TrainingParams,
@@ -91,5 +91,5 @@ class REINFORCE(LearningAlgorithm):
         }
            
     def on_validation_epoch_end(self):
-        val_reward = self._get_global_validation_reward()
-        self.baseline.epoch_callback(self.policy, val_reward)
+        val_rewards = self._get_global_validation_rewards()
+        self.baseline.epoch_callback(self.policy, val_rewards[self.monitor_instance])

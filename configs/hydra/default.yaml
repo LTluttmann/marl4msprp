@@ -13,7 +13,7 @@ job:
     CUDA_DEVICE_ORDER: PCI_BUS_ID
   
 run:
-  dir: ${paths.log_dir}/runs/${hydra.job.name}/${run_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dir: ${paths.log_dir}/runs/${hydra.job.name}/${run_name}/${model_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
 sweep:
-  dir: ${paths.log_dir}/multiruns/${hydra.job.name}/${run_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dir: ${paths.log_dir}/multiruns/${hydra.job.name}/${run_name}/${model_name}/${now:%Y-%m-%d}_${now:%H-%M-%S}
   subdir: ${hydra.job.num}

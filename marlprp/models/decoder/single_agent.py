@@ -1,91 +1,162 @@
-import abc
-from typing import Tuple, TypedDict
+from typing import TypedDict
 
 import torch
-from torch.distributions import Categorical
-from tensordict import TensorDict
 from einops import rearrange
+from tensordict import TensorDict
+from torch.distributions import Categorical
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
+from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import TransformerParams
-from marlprp.utils.ops import gather_by_index
-from marlprp.models.decoder.base import BaseDecoder
+from marlprp.models.encoder.base import MatNetEncoderOutput
 
-from .mlp import JobMachinePointer
+from .base import BaseDecoder
+from .attn import AttentionPointer
 
 
 __all__ = []
 
 class SingleAgentAction(TypedDict):
-    idx: torch.Tensor  # the flat (in case of combined action space) action
-    job: torch.Tensor
-    machine: torch.Tensor
+    agent: torch.Tensor  # the flat (in case of combined action space) action
+    shelf: torch.Tensor
+    sku: torch.Tensor
 
 
 
+class HierarchicalSingleAgentDecoder(BaseDecoder):
 
-class BaseSingleAgentDecoder(BaseDecoder):
-    def __init__(self, pointer, params: TransformerParams) -> None:
-        super().__init__(params)
-        self.pointer = pointer
+    def __init__(self, model_params: TransformerParams):
+        super().__init__(model_params)
+        self.use_attn_mask = model_params.decoder_attn_mask
+        self.dec_strategy = None
+        self.shelf_pointer = AttentionPointer(model_params, decoder_type="shelf")
+        self.sku_pointer = AttentionPointer(model_params, decoder_type="sku")
 
-    def forward(
-        self, 
-        embeddings: TensorDict, 
-        td: TensorDict, 
-        env: MSPRPEnv, 
-        return_logp: bool = False
-    ):
-        
-        logits, mask = self.pointer(embeddings, td)
-        logp, mask = self._logits_to_logp(logits, mask)
-        td = self.dec_strategy.step(logp, mask, td)
-        action = self._translate_action(td, env)
+    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MultiAgentEnv, return_logp = False):
+        shelf_mask = env.get_node_mask(state)
+        attn_mask = self._get_attn_mask(shelf_mask, state)
+        shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
+        shelf_logp, step_mask = self._logits_to_logp(shelf_logits, shelf_mask)
+        next_shelves, shelf_logps = self.dec_strategy.step(shelf_logp, step_mask, state, key="shelf")
+        shelf_action = self._translate_action(next_shelves, state, "shelf")
+
+        # partial step through the environment to get intermediate state s'
+        intermediate_state = env.step(shelf_action, state)
+        # get new action mask from intermediate state
+        sku_mask = env.get_sku_mask(intermediate_state, shelf_action)
+        attn_mask = self._get_attn_mask(sku_mask, state)
+        sku_logits = self.sku_pointer(embeddings, intermediate_state, attn_mask=attn_mask)
+        sku_logp, step_mask = self._logits_to_logp(sku_logits, sku_mask)
+        skus_to_pick, sku_logps = self.dec_strategy.step(sku_logp, step_mask, intermediate_state, key="sku")
+        skus_action = self._translate_action(skus_to_pick, state, "sku") 
+
+        # step through environment with handled conflicts to get next state
+        next_state = env.step(skus_action, intermediate_state)
+
+        # save actions as tensordict
+        actions = TensorDict({
+            "shelf": shelf_action, 
+            "sku": skus_action
+        }, batch_size=shelf_action.batch_size)
+        masks = TensorDict({"shelf": shelf_mask, "sku": sku_mask}, batch_size=state.batch_size)
+
+        return_dict = {"state": state, "action": actions, "next": next_state, "action_mask": masks}
         if return_logp:
-            logp = self.dec_strategy.logp["action"][-1]
-            td["logprobs"] = logp
-        # insert action td
-        td.set("action", action)
-        return td
-    
-    def get_logp_of_action(self, embeddings: TensorDict, td: TensorDict):
-        logits, mask = self.pointer(embeddings, td)
-        logp, _ = self._logits_to_logp(logits, mask)
-        action_logp = gather_by_index(logp, td["action"]["idx"])
-        dist_entropys = Categorical(logp.exp()).entropy()
-        return action_logp, dist_entropys, None  # no mask due to padding in single agent settings
-    
-    @abc.abstractmethod
-    def _logits_to_logp(self, logits, mask) -> Tuple[torch.Tensor, torch.Tensor]:
-        pass
-    
-    @abc.abstractmethod
-    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
-        pass
-    
+            logps = TensorDict({"shelf": shelf_logps, "sku": sku_logps}, batch_size=shelf_logps.batch_size)
+            return_dict["logprobs"] = logps
 
-class JobMachineMLPDecoder(BaseSingleAgentDecoder):
-    def __init__(self, params: TransformerParams) -> None:
-        pointer = JobMachinePointer(params)
-        super().__init__(pointer, params)
-
-    def _logits_to_logp(self, logits, mask):
-        mask = rearrange(mask, "b m j -> b (j m)")
-        logits = rearrange(logits, "b m j -> b (j m)")
-        logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
-        return logp, mask
-
-    def _translate_action(self, td: TensorDict, env: MSPRPEnv) -> SingleAgentAction:
-        # translate and store action
-        action = td["action"]
-        selected_machine = action % env.num_mas
-        selected_job = action // env.num_mas
+        return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
+    
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, key: str):
         action = TensorDict(
             {
-                "idx": action, 
-                "job": selected_job, 
-                "machine": selected_machine,
-            },
-            batch_size=td.batch_size
+                "agent": state.active_agent,
+                key: action_idx.unsqueeze(1),
+                "idx": action_idx.unsqueeze(1),
+            }, 
+            batch_size=(*state.batch_size, 1)
         )
         return action
+    
+    def _get_attn_mask(self, action_mask: torch.Tensor, state: MSPRPState):
+        bs, n_agents, n_actions = action_mask.shape
+        if self.use_attn_mask:
+            attn_mask = ~action_mask.gather(1, state.active_agent.view(bs, 1, 1).expand(bs, n_actions))
+        else:
+            attn_mask = None
+        return attn_mask
+
+    def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
+        state = state.clone()
+        masks = masks.clone()
+        actions = actions.clone()
+    
+        shelf_action = actions["shelf"]
+        shelf_mask = masks["shelf"]
+
+        if self.use_attn_mask:
+            attn_mask = ~shelf_mask
+        else:
+            attn_mask = ~shelf_mask
+
+        shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
+        shelf_logp, _ = self._logits_to_logp(shelf_logits, shelf_mask)
+        shelf_entropy = Categorical(probs=shelf_logp.exp()).entropy().unsqueeze(-1)
+        selected_shelf_logp = shelf_logp.gather(1, shelf_action["idx"])
+
+        # update state
+        state.current_location = state.current_location.scatter(
+            1, shelf_action["agent"], shelf_action["shelf"]
+        )
+
+        sku_action = actions["sku"]
+        sku_mask = masks["sku"]
+
+        if self.use_attn_mask:
+            attn_mask = ~sku_mask
+        else:
+            attn_mask = ~sku_mask
+
+        sku_logits = self.sku_pointer(embeddings, state, attn_mask=attn_mask)
+        sku_logp, _ = self._logits_to_logp(sku_logits, sku_mask)
+        sku_entropy = Categorical(probs=sku_logp.exp()).entropy().unsqueeze(-1)
+        selected_sku_logp = sku_logp.gather(1, sku_action["idx"])
+
+        action_logp = selected_shelf_logp + selected_sku_logp
+        entropy = shelf_entropy + sku_entropy
+
+        return action_logp, entropy, None
+
+    def _logits_to_logp(self, logits, mask):
+        bs = logits.size(0)
+        logits = logits.view(bs, -1)
+        mask = mask.view(bs, -1)
+        # (bs, num_actions)
+        logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)  
+        return logp, mask
+    
+
+class Hierarchical2dPtrDecoder(HierarchicalSingleAgentDecoder):
+    def __init__(self, model_params: TransformerParams):
+        super().__init__(model_params)
+
+    def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, key: str):
+        # translate and store action
+        selected_agent = action_idx % state.num_agents
+        selected_action = action_idx // state.num_agents
+
+        action = TensorDict(
+            {
+                "idx": action_idx.unsqueeze(1), 
+                "agent": selected_agent.unsqueeze(1), 
+                key: selected_action.unsqueeze(1),
+            },
+            batch_size=(*state.batch_size, 1)
+        )
+        return action
+    
+    def _logits_to_logp(self, logits, mask):
+        mask = rearrange(mask, "b a s -> b (s a)")
+        logits = rearrange(logits, "b a s -> b (s a)")
+        logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
+        return logp, mask

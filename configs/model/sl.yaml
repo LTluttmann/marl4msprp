@@ -2,31 +2,30 @@
 model:
   algorithm: sl
   inner_epochs: #  5
-    - 3
-    - 10
+    - 5
+    - 12
     - 1.05
   rollout_batch_size: 100
   mini_batch_size: 2000
   num_starts: 100
-  eval_per_agent: True
+  eval_per_agent: False
   eval_multistep: True
-  loss: ce
   listnet_alpha: 0.0
   lookback_intervals: 0
-  always_clear_buffer: true
-  update_after_every_batch: true
+  always_clear_buffer: True
+  update_after_every_batch: True
 
 
 train:
   batch_size: 1000
   dataset_size: 4000
 
-callbacks:
+# callbacks:
 
-  lr_warmup_callback:
-    _target_: marlprp.utils.callbacks.LearningRateWarmupCallback
-    warmup_steps: 10
-    initial_lr: 1e-7
+#   lr_warmup_callback:
+#     _target_: marlprp.utils.callbacks.LearningRateWarmupCallback
+#     warmup_steps: 10
+#     initial_lr: 1e-7
     
   # validation_scheduler:
   #   _target_: marlprp.utils.callbacks.ValidationScheduler

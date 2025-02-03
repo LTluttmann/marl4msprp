@@ -1,9 +1,7 @@
-# @package _global_
 defaults:
-  - env: base_env
+  - base_env
 
-env:
-  num_shelves: 25
-  num_skus: 18
-  num_storage_locations: 50
-  capacity: 15
+num_shelves: 25
+num_skus: 18
+num_storage_locations: 50
+capacity: 15

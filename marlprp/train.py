@@ -8,13 +8,14 @@ from rl4co.utils.trainer import RL4COTrainer
 from rl4co.utils import instantiate_callbacks
 from hydra.core.hydra_config import HydraConfig
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv, AREnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.logger import get_lightning_logger
 from marlprp.algorithms.base import LearningAlgorithm
 from marlprp.utils.utils import hydra_run_wrapper, get_wandb_logger
 from marlprp.utils.config import (
     EnvParams, 
+    EnvParamList,
     PolicyParams,
     ModelParams, 
     TrainingParams, 
@@ -31,7 +32,8 @@ def get_trainer(
         cfg: DictConfig, 
         train_params: TrainingParams,
         model_params: ModelParams,
-        hc: HydraConfig
+        hc: HydraConfig,
+        model,
     ) -> RL4COTrainer:
     
     log.info("Instantiating callbacks...")
@@ -39,8 +41,10 @@ def get_trainer(
 
     if cfg.get("logger", None) is not None:
         log.info("Instantiating loggers...")
-        logger = get_wandb_logger(cfg, model_params, hc)
-
+        logger = get_wandb_logger(cfg, model_params, hc, model)
+    else:
+        logger = None
+        
     devices = train_params.devices
     log.info(f"Running job on GPU with ID {', '.join([str(x) for x in devices])}")
     log.info("Instantiating trainer...")
@@ -66,8 +70,11 @@ def get_trainer(
 @hydra.main(version_base=None, config_path="../configs/", config_name="main")
 @hydra_run_wrapper
 def main(cfg: DictConfig):
-
-    instance_params = EnvParams.initialize(**cfg.env)
+    env_list = getattr(cfg, "env_list", None)
+    if env_list is not None:
+        instance_params = EnvParamList.initialize(env_list)
+    else:
+        instance_params = EnvParams.initialize(**cfg.env)
     train_params = TrainingParams(**cfg.train)
     val_params = ValidationParams(**cfg.val)
     test_params = TestParams(**cfg.test)
@@ -89,24 +96,9 @@ def main(cfg: DictConfig):
 
         policy_params = PolicyParams.initialize(env=instance_params, **cfg.policy)
         model_params = ModelParams.initialize(policy_params=policy_params, **cfg.model)
-        env = MSPRPEnv(params=instance_params)
+        env = MultiAgentEnv.initialize(params=instance_params)
         policy = RoutingPolicy.initialize(policy_params)
-        trainer = get_trainer(cfg, train_params, model_params, hc)
-        if model_params.warmup_params is not None:
-            warmup_model = LearningAlgorithm.initialize(
-                env, 
-                policy, 
-                model_params=model_params.warmup_params,
-                train_params=train_params,
-                val_params=val_params, 
-                test_params=test_params
-            )
-            log.info("Warming up the policy for one epoch...")
-            trainer.fit_loop.max_epochs = train_params.warmup_epochs or 1
-            trainer.fit(warmup_model)
-            trainer.fit_loop.max_epochs = train_params.epochs
-            log.info("...warmup finished")
-
+       
         model = LearningAlgorithm.initialize(
             env, 
             policy, 
@@ -116,6 +108,7 @@ def main(cfg: DictConfig):
             test_params=test_params
         )
 
+        trainer = get_trainer(cfg, train_params, model_params, hc, model)
     # send hparams to all loggers
 
     for logger in trainer.loggers:

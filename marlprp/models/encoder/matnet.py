@@ -4,7 +4,7 @@ from torch.nn.modules import TransformerEncoderLayer
 from torch.nn.modules.normalization import LayerNorm
 
 from marlprp.env.instance import MSPRPState
-from marlprp.models.policy_args import MatNetParams
+from marlprp.models.policy_args import TransformerParams
 from marlprp.models.nn.init_embeddings import get_init_emb_layer
 
 from .base import BaseEncoder, MatNetEncoderOutput
@@ -13,7 +13,7 @@ from .mixed_attention import EfficientMixedScoreMultiHeadAttention
 
 class MatNetEncoderLayer(nn.Module):
 
-    def __init__(self, params: MatNetParams) -> None:
+    def __init__(self, params: TransformerParams) -> None:
         super().__init__()
 
         self.norm_first = params.norm_first
@@ -101,7 +101,7 @@ class MatNetEncoderLayer(nn.Module):
 
 
 class MatNetEncoder(BaseEncoder):
-    def __init__(self, params: MatNetParams) -> None:
+    def __init__(self, params: TransformerParams) -> None:
         super().__init__()
         self.embed_dim = params.embed_dim
         self.num_heads = params.num_heads
@@ -119,7 +119,6 @@ class MatNetEncoder(BaseEncoder):
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
             cross_mask = edge_feat.gt(0)
-            cross_mask[:, :state.num_depots] = True
         else:
             cross_mask = None
 
@@ -134,5 +133,54 @@ class MatNetEncoder(BaseEncoder):
         
         return TensorDict(
             {"shelf": node_emb, "sku": sku_emb}, 
+            batch_size=state.batch_size
+        )
+
+
+class ETEncoder(BaseEncoder):
+    def __init__(self, params: TransformerParams) -> None:
+        super().__init__()
+        self.embed_dim = params.embed_dim
+        self.num_heads = params.num_heads
+        self.init_embedding = get_init_emb_layer(params)
+        self.mask_no_edge = params.mask_no_edge
+
+        self.agent_mha = TransformerEncoderLayer(
+            d_model=params.embed_dim,
+            nhead=params.num_heads,
+            dim_feedforward=params.feed_forward_hidden,
+            dropout=params.dropout,
+            activation=params.activation,
+            norm_first=params.norm_first,
+            batch_first=True,
+        )
+
+        self.encoder = nn.ModuleList([])
+        for _ in range(params.num_encoder_layers):
+            self.encoder.append(MatNetEncoderLayer(params))
+
+
+    def forward(self, state: MSPRPState) -> MatNetEncoderOutput:
+        # (bs, jobs, ops, emb); (bs, ma, emb); (bs, jobs*ops, ma)
+        node_emb, sku_emb, edge_feat, agent_emb = self.init_embedding(state)
+        agent_emb = self.agent_mha(agent_emb)
+
+        if self.mask_no_edge:
+            # (bs, num_job, num_ma)
+            cross_mask = edge_feat.gt(0)
+        else:
+            cross_mask = None
+
+        # run through the layers 
+        for layer in self.encoder:
+            node_emb, sku_emb = layer(
+                node_emb, 
+                sku_emb, 
+                cost_mat=edge_feat, 
+                cross_mask=cross_mask,
+            )
+        
+        return TensorDict(
+            {"shelf": node_emb, "sku": sku_emb, "agent": agent_emb}, 
             batch_size=state.batch_size
         )

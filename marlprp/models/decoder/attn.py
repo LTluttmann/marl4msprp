@@ -133,11 +133,4 @@ class AttentionPointer(BasePointer):
         # (b, a, nodes)
         logits = self.pointer(q, k, v, logit_key, attn_mask=attn_mask)
         return logits
-        # # (b, a, 1)
-        # ranking_scores = self.agent_ranker(q)
-        # # (b, a, a)
-        # s_t_s = torch.abs(ranking_scores - ranking_scores(0, 2, 1))
-        # # (b, a, nodes)
-        # logits_ranked = torch.bmm(s_t_s, logits)
-        # return logits_ranked
 

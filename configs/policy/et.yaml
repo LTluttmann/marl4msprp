@@ -1,0 +1,8 @@
+# @package _global_
+policy:
+  policy: et
+
+env:
+  name: ar
+  num_agents: null
+  goal: min-max

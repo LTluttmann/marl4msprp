@@ -1,0 +1,8 @@
+# @package _global_
+policy:
+  policy: ham
+  
+env:
+  name: msprp
+  num_agents: 1
+  goal: min-max

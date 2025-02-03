@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from tensordict import TensorDict
 
-from marlprp.utils.config import EnvParams, LargeEnvParams
+from marlprp.utils.config import EnvParams, LargeEnvParams, EnvParamList
 
 
 class MSPRPGenerator:
@@ -13,14 +13,11 @@ class MSPRPGenerator:
     ):
 
         super(MSPRPGenerator, self).__init__()
-
-        # np.random.seed(instance_params.seed)
-        # torch.manual_seed(instance_params.seed)
-
+        
         self.num_depots = instance_params.num_depots
         self.num_skus = instance_params.num_skus
         self.num_shelves = instance_params.num_shelves
-        self.size_tuple = (self.num_shelves, self.num_skus)
+        self.size = self.num_shelves * self.num_skus
         self.num_storage_locations = instance_params.num_storage_locations
         self.capacity = instance_params.capacity
 
@@ -39,6 +36,7 @@ class MSPRPGenerator:
             self.max_supply = instance_params.max_supply
 
         self._num_agents = instance_params.num_agents
+        self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
     def _simulate_batch(self, bs: tuple):
         # simulate supply [BS, P, S]
@@ -64,12 +62,12 @@ class MSPRPGenerator:
 
         # simulate for each batch a series of indices which correspond to the item/shelf combinations for 
         # which supply is available: [BS, PS], where PS is the number of desired physical items in the warehouse
-        idx = torch.argsort(torch.rand(*bs, np.prod(self.size_tuple)))[:,:self.num_storage_locations]
+        idx = torch.argsort(torch.rand(*bs, self.size))[:,:self.num_storage_locations]
         # in order to select only those supply nodes which were sampled in idx, flatten the supply tensor [BS, P*S]. 
         # Select only entries from supply which were sampled in idx and use entries of zeros tensor otherwise. 
         # In the end reshape to [BS, P, S]
         supply = torch.scatter(
-            torch.zeros(*bs, np.prod(self.size_tuple)), 
+            torch.zeros(*bs, self.size), 
             dim=1, 
             index=idx, 
             src=supply.view(*bs, -1)
@@ -112,8 +110,6 @@ class MSPRPGenerator:
         return self._simulate_batch(batch_size)
 
 
-
-
 class LargeMSPRPInstanceGenerator:
 
     def __init__(
@@ -132,7 +128,7 @@ class LargeMSPRPInstanceGenerator:
         self.max_sku_per_shelf = instance_params.max_sku_per_shelf
 
         self.num_shelves = instance_params.num_shelves
-        self.size_tuple = (self.num_shelves, self.max_sku_per_shelf)
+        self.size = self.num_shelves * self.max_sku_per_shelf
 
         # self.num_storage_locations = instance_params.num_storage_locations
 

@@ -1,0 +1,8 @@
+# @package env_list.25s_15i_50p
+defaults:
+  - base_env
+
+num_shelves: 25
+num_skus: 15
+num_storage_locations: 50
+capacity: 12

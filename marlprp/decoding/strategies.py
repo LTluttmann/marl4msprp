@@ -3,7 +3,7 @@ from typing import Tuple
 from collections import defaultdict
 from tensordict.tensordict import TensorDict
 
-from marlprp.env.env import MSPRPEnv
+from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.ops import unbatchify
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.logger import get_lightning_logger
@@ -28,7 +28,6 @@ def get_decoding_strategy(decoding_strategy, **config):
     return strategy_registry.get(decoding_strategy, Sampling)(**config)
 
 
-
 class DecodingStrategy:
     name = ...
 
@@ -40,7 +39,6 @@ class DecodingStrategy:
             num_decoding_samples: float = None,
             only_store_selected_logp: bool = True, 
             select_best: bool = True,
-            store: bool = True,
         ) -> None:
         # init buffers
         self.top_p = top_p
@@ -49,10 +47,9 @@ class DecodingStrategy:
         self.logp = defaultdict(list)
         self.actions = defaultdict(list)
         self.select_best = select_best
-        self.tanh_clipping = tanh_clipping
+        self.tanh_clipping = tanh_clipping or 0
         self.num_starts = num_decoding_samples or 0
         self.only_store_selected_logp = only_store_selected_logp
-        self.store = store
 
     def _step(self, logp: torch.Tensor, td: TensorDict, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError("Must be implemented by subclass")
@@ -68,7 +65,7 @@ class DecodingStrategy:
         self, 
         state: MSPRPState, 
         embeddings: MatNetEncoderOutput, 
-        env: MSPRPEnv
+        env: MultiAgentEnv
     ):
         """called by models, that encode every step. This hook is called before the encoder"""
         self.setup()
@@ -82,10 +79,8 @@ class DecodingStrategy:
         """called by models, that encode only once and then use the generated embeddings to encode
         a complete solution"""
         ...
-    
 
-
-    def post_decoder_hook(self, state: MSPRPState, env: MSPRPEnv):
+    def post_decoder_hook(self, state: MSPRPState, env: MultiAgentEnv):
         """called by all models after a full solution is obtained"""
         def stack_and_gather_logp(logp, actions):
             assert (
@@ -134,13 +129,12 @@ class DecodingStrategy:
         if self.only_store_selected_logp:
             logp = logp.gather(-1, selected_actions.unsqueeze(-1)).squeeze(-1)
 
-        if self.store:
-            self.actions[key].append(selected_actions)
-            self.logp[key].append(logp)
+        self.actions[key].append(selected_actions)
+        self.logp[key].append(logp)
 
         return selected_actions, logp
 
-    def _select_best_start(self, logp, actions, state: MSPRPState, env: MSPRPEnv):
+    def _select_best_start(self, logp, actions, state: MSPRPState, env: MultiAgentEnv):
         aug_batch_size = logp.size(0)  # num nodes
         batch_size = aug_batch_size // self.num_starts
         rewards = env.get_reward(state)

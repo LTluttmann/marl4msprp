@@ -1,5 +1,6 @@
-from .matnet import MatNetEncoder
+from .matnet import MatNetEncoder, ETEncoder
 
 __all__ = [
-    "MatNetEncoder"
+    "MatNetEncoder",
+    "ETEncoder"
 ]
