@@ -34,10 +34,7 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
 
     def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MultiAgentEnv, return_logp = False):
         shelf_mask = env.get_node_mask(state)
-        if self.use_attn_mask:
-            attn_mask = ~shelf_mask
-        else:
-            attn_mask = None
+        attn_mask = self._get_attn_mask(shelf_mask, state)
         shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
         shelf_logp, step_mask = self._logits_to_logp(shelf_logits, shelf_mask)
         next_shelves, shelf_logps = self.dec_strategy.step(shelf_logp, step_mask, state, key="shelf")
@@ -47,12 +44,7 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
         intermediate_state = env.step(shelf_action, state)
         # get new action mask from intermediate state
         sku_mask = env.get_sku_mask(intermediate_state, shelf_action)
-
-        if self.use_attn_mask:
-            attn_mask = ~sku_mask
-        else:
-            attn_mask = ~sku_mask
-
+        attn_mask = self._get_attn_mask(sku_mask, state)
         sku_logits = self.sku_pointer(embeddings, intermediate_state, attn_mask=attn_mask)
         sku_logp, step_mask = self._logits_to_logp(sku_logits, sku_mask)
         skus_to_pick, sku_logps = self.dec_strategy.step(sku_logp, step_mask, intermediate_state, key="sku")
@@ -85,6 +77,14 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
             batch_size=(*state.batch_size, 1)
         )
         return action
+    
+    def _get_attn_mask(self, action_mask: torch.Tensor, state: MSPRPState):
+        bs, n_agents, n_actions = action_mask.shape
+        if self.use_attn_mask:
+            attn_mask = ~action_mask.gather(1, state.active_agent.view(bs, 1, 1).expand(bs, n_actions))
+        else:
+            attn_mask = None
+        return attn_mask
 
     def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
         state = state.clone()

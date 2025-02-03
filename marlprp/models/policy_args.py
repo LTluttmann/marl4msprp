@@ -62,3 +62,10 @@ class Ptr2DParams(TransformerParams):
     # def __post_init__(self):
     #     super().__post_init__()
     #     assert self.env.name == "ar", "2D-Ptr only works with pure autoregressive env"
+
+@dataclass(kw_only=True)
+class ParcoParams(TransformerParams):
+    policy: str = "parco"
+    use_communication: bool = True
+    use_rezero: bool = False
+    use_ranking_pe: bool = False

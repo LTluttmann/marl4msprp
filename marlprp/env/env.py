@@ -17,11 +17,12 @@ env_registry = Registry()
 
 
 
-
-
-
 @env_registry.register("msprp")
 class MultiAgentEnv:
+    """Standard Environment for the multi-agent MSPRP, which assumes the presence of multiple agents and performs a step for each 
+    agent per timestep.
+    """
+
 
     name = "msprp"
 
@@ -153,10 +154,19 @@ class MultiAgentEnv:
 
     def get_node_mask(self, state: MSPRPState):
         """
-        Gets a (batch_size, n_loc + 1) mask with the feasible actions (0 = depot), depends on already visited and
-        remaining capacity. 0 = feasible, 1 = infeasible
-        Forbids to visit depot twice in a row, unless all nodes have been visited
-        :return:
+        Gets a (batch_size, num_agents, n_loc + n_depots) mask for shelves and depots. An agent may not visit a shelf 
+        if (1) the agent has no capacity left or (2) the shelf has no supply for any (still) demanded skus. 
+        
+        Further, in env where an agent may perform multiple tours (i.e. self.is_multitour_instance), the depot
+        will be masked infeasible only if the agent is already at the depot and there is still demanded skus to retrieve.
+        In case that each agent only performs a single tour, we always mask the depot for an agent unless the other agents
+        are able to retrieve all demanded items w.r.t their capacity constraints. 
+        
+        In the end some sanity checks are performed. In finished environments, each agent may only stay at its current 
+        position and padded agents may never move.
+
+        Returns:
+            agent_node_mask: shape = (bs, num_agents, num_shelves+1)
         """
         # (bs, num_agents)
         has_no_capacity = state.remaining_capacity.eq(0)
@@ -167,6 +177,7 @@ class MultiAgentEnv:
         no_more_demand = state.demand.eq(0).all(1)
 
         if not self.is_multitour_instance:
+            # Here we unmask the depot for the agent with the longest tour, if the capacity of the others is sufficient
             # (bs, num_agents, num_agents)
             remaining_capacity_expanded = state.remaining_capacity.unsqueeze(1).repeat(1, state.num_agents, 1)
             mask = torch.eye(state.num_agents, device=state.device).bool().unsqueeze(0).expand_as(remaining_capacity_expanded)
@@ -175,9 +186,20 @@ class MultiAgentEnv:
             remaining_demand = state.demand.sum(-1, keepdim=True)
             mask_depot = capacity_of_other_agents.lt(remaining_demand) & remaining_demand.gt(0)
             # (bs, num_agents ,num_depots)
+            mask_depot = mask_depot & ~mask_loc_per_agent.all(-1)  # NOTE necessary for parco
             mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
-            # NOTE this check should not be necessary
-            # mask_depot = ~mask_loc_per_agent.all(-1, keepdims=True).repeat(1, 1, state.num_depots)
+            # NOTE below code unmasks depot only for agent with longest tour. Howeverm enforcing this could 
+            # possibly mask the optimal solution (e.g. if agent with 2. longest tour has a long way to depot)
+            # Best way is to let the policy learn this and simply unmask all agents depot actions 
+            # -----------------------------------------------------------------------------------------
+            # unmask_depot = capacity_of_other_agents.ge(remaining_demand) & remaining_demand.gt(0)
+            # # (bs, num_agents ,num_depots)
+            # aug_tour_length = state.tour_length.clone()
+            # aug_tour_length += torch.arange(state.num_agents, device=state.device).view(1, -1).repeat(state.size(0), 1) * 1e-6
+            # is_longest_tour = aug_tour_length == aug_tour_length.max(1,keepdim=True).values
+            # unmask_depot = unmask_depot & is_longest_tour
+            # mask_depot = ~(unmask_depot | mask_loc_per_agent.all(-1))
+            # mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
         else:
             # We should avoid traveling to the depot back-to-back, except instance is done
             # (bs, num_agents)
@@ -207,12 +229,13 @@ class MultiAgentEnv:
 
     def get_sku_mask_at_node(self, state: MSPRPState, chosen_nodes: TensorDict = None):
         """
-        Gets a (batch_size, n_items+1) mask with the feasible actions depending on item supply at visited 
-        shelf and item demand. 0 = feasible, 1 = infeasible
-        NOTE that this returns mask of shape (bs, num_items+1) for one additional dummy item in case no 
-        item is feasible (ie when at the depot). This would raise issues with softmax
-        Forbids to visit depot twice in a row, unless all nodes have been visited
-        :return: mask (batch_size, n_items) with 0 = feasible, 1 = infeasible
+        Gets a (batch_size, n_agents, n_items+1) mask with the feasible actions depending on item supply at visited 
+        shelf and item demand. True = infeasible; False = feasible
+        NOTE that this returns mask of shape (bs, n_agents, num_items+1) for one additional dummy item in case no 
+        item is feasible (ie when at the depot). This would raise issues with softmax.
+
+        Returns:
+            sku_masks: shape = (bs, num_agents, n_items+1)
         """
         # [BS]
         # lets assume that, after selecting a shelf, we first update the state and then
@@ -260,8 +283,8 @@ class MultiAgentEnv:
             # cases and unmask the dummy item
             mask[:, 0] = torch.where(mask.all(-1), False, mask[:,0])
 
-            sku_masks[batch_idx, agent] =  mask
-            # sku_masks.scatter(1, agent.view(-1, 1, 1).expand(-1, 1, state.num_skus+1), mask[:, None])
+            # sku_masks[batch_idx, agent] =  mask
+            sku_masks = sku_masks.scatter(1, agent.view(-1, 1, 1).expand(-1, 1, state.num_skus+1), mask[:, None])
             # sku_masks.append(mask)
 
         # sku_masks = torch.stack(sku_masks, dim=1)
@@ -287,6 +310,11 @@ class MultiAgentEnv:
 
 @env_registry.register("ar")
 class AREnv(MultiAgentEnv):
+    """Environment for purely autoregressive approaches. These approaches make the agent be part of the environment and increment 
+    an agent counter (i.e. state.active_agent) when the current agent has finished its tour. 
+    """
+
+
     name = "ar"
 
     def __init__(self, params = None):
@@ -332,11 +360,14 @@ class AREnv(MultiAgentEnv):
         return state
 
     def get_node_mask(self, state: MSPRPState):
-        """
-        Gets a (batch_size, n_loc + 1) mask with the feasible actions (0 = depot), depends on already visited and
-        remaining capacity. 0 = feasible, 1 = infeasible
-        Forbids to visit depot twice in a row, unless all nodes have been visited
-        :return:
+        """The node mask for the 2d-Ptr is almost identical to the on for the Parallel Stepping Env. However, 
+        since in each step only one agent performs an action, we want to avoid that a finished agent successively 
+        performs the 'stay-where-I-am-action, we mask finished agents if there are agents in the same instance,
+        which are not done yet. When all agents are done, we release the mask for finished agents in order to avoid
+        nans in the softmax (necessary when not all instances in the batch are done)
+        
+        Returns:
+            agent_node_mask: shape = (bs, num_agents, num_shelves+1)
         """
         # (bs, 1)
         current_agent = state.active_agent
@@ -364,18 +395,42 @@ class AREnv(MultiAgentEnv):
         agent_node_mask = torch.cat((mask_depot, mask_loc_and_agent), 2).bool()
         return agent_node_mask
         
+    def get_sku_mask_at_node(self, state: MSPRPState, chosen_nodes: TensorDict = None):
+        """
+        Gets a (batch_size, 1, n_items+1) mask from the (batch_size, num_agents, n_items+1) mask defined by the 
+        base env. 
+
+        Returns:
+            sku_masks: shape = (bs, 1, n_items+1)
+        """
+        sku_mask_per_agent = super().get_sku_mask_at_node(state, chosen_nodes)
+        return gather_by_index(sku_mask_per_agent, chosen_nodes["agent"], dim=1, squeeze=False)
 
 
 @env_registry.register("sa")
 class SingleAgentSteppingEnv(MultiAgentEnv):
+    """Environment for 2d-Ptr, where we observe M agents per timestep, but only generate an action for one of them. This 
+    approach requires an action mask for every agent-action combination per step, as it generates a full join-distribution
+    over agents per step.
+    """
+
+
     name = "sa"
 
     def __init__(self, params = None):
-        """Env for 2d-Ptr, where we observe M agents per timestep, but only generate an action for one of them"""
         super().__init__(params)
         assert not self.is_multitour_instance, "expects one agent per tour"
 
     def get_node_mask(self, state: MSPRPState):
+        """The node mask for the 2d-Ptr is almost identical to the on for the Parallel Stepping Env. However, 
+        since in each step only one agent performs an action, we want to avoid that a finished agent successively 
+        performs the 'stay-where-I-am-action, we mask finished agents if there are agents in the same instance,
+        which are not done yet. When all agents are done, we release the mask for finished agents in order to avoid
+        nans in the softmax (necessary when not all instances in the batch are done)
+
+        Returns:
+            agent_node_mask: shape = (bs, num_agents, num_shelves+1)
+        """
         # (bs, num_agents)
         has_no_capacity = state.remaining_capacity.eq(0)
         # (bs, num_shelves)

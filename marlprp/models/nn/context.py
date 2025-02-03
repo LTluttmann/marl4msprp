@@ -29,6 +29,10 @@ def get_context_emb(params: PolicyParams, key: str = None):
             "shelf": MultiAgentContext,
             "sku": MultiAgentContext
         },
+        "parco": {
+            "shelf": MultiAgentContext,
+            "sku": MultiAgentContext
+        },
     }
 
     EmbCls = emb_registry.get(params.policy)
@@ -88,35 +92,6 @@ class MultiAgentContext(nn.Module):
             agent_emb = self.pe(agent_emb, agent_ranks, mask=state.agent_pad_mask)
         if hasattr(self, "comm_layer"):
             agent_emb = self.comm_layer(agent_emb)
-        return agent_emb
-
-
-class SingleAgentContext(nn.Module):
-
-    def __init__(self, params: MahamParams):
-        super().__init__()
-        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
-        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
-
-    def agent_state_emb(self, state: MSPRPState):
-
-        feats = torch.stack([
-            state.remaining_capacity / state.capacity,
-            (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
-        ], dim=-1)
-        state_emb = self.proj_agent_state(feats)
-        return state_emb
-
-    def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
-        shelf_emb = emb["shelf"]
-        current_locs = state.current_location
-        # get embedding of current location of agents
-        current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
-        # get embedding for agent state
-        state_emb = self.agent_state_emb(state)
-        # cat and project
-        agent_emb = torch.cat((current_loc_emb, state_emb), dim=-1)
-        agent_emb = self.proj_agent(agent_emb)
         return agent_emb
 
 

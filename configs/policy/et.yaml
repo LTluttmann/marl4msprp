@@ -5,3 +5,4 @@ policy:
 env:
   name: ar
   num_agents: null
+  goal: min-max

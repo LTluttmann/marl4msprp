@@ -36,7 +36,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
     def __init__(self, model_params):
         super().__init__(model_params)
 
-        self.dec_strategy = None
+        self.dec_strategy: DecodingStrategy = None
         self.shelf_decoder = MultiAgentShelfDecoder(model_params)
         self.sku_decoder = MultiAgentSkuDecoder(model_params)
 
@@ -132,6 +132,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         self.eval_per_agent = params.eval_per_agent
         self.pad = params.eval_multistep
         self.dec_strategy = dec_strategy
+        self.use_attn_mask = params.decoder_attn_mask
         self.loss = "listnet"
 
     def forward(
@@ -143,7 +144,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
     ):
         num_agents = state.num_agents
         # get logits and mask
-        attn_mask = self.get_attn_mask(state, env)
+        attn_mask = self.get_attn_mask(mask, state)
         logits = self.pointer(embeddings, state, attn_mask=attn_mask)
         mask = mask.clone()
         # initialize action buffer
@@ -185,9 +186,10 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
         return actions, logps
 
-    def get_attn_mask(self, state, env):
-        return None
-
+    def get_attn_mask(self, action_mask, state):
+        # in F.scaled_dot_product_attn, True mean "attend", False means not attend
+        if self.use_attn_mask:  
+            return ~action_mask
 
     @abc.abstractmethod
     def _update_mask(self, mask: Tensor, actions: List[MultiAgentAction], state: MSPRPState, busy_agents: list, env) -> Tensor:
@@ -288,7 +290,7 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
         if pointer is None:
             pointer = AttentionPointer(params, decoder_type=self.key)
         super().__init__(pointer=pointer, params=params, dec_strategy=dec_strategy)
-        self.use_attn_mask = params.decoder_attn_mask
+        
 
     def _translate_action(self, action_idx: torch.Tensor, state: MSPRPState, env: MultiAgentEnv) -> MultiAgentAction:
         # translate and store action
@@ -349,11 +351,6 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
 
         return updated_mask
     
-    def get_attn_mask(self, state: MSPRPState, env: MultiAgentEnv):
-        # in F.scaled_dot_product_attn, True mean "attend", False means not attend
-        if self.use_attn_mask:  
-            return ~env.get_node_mask(state)
-    
 
 class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
     key = "sku"
@@ -412,9 +409,196 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
 
         return mask
 
-    def get_attn_mask(self, state: MSPRPState, env: MultiAgentEnv):
-        # omit dummy item mask
+
+###################################################
+###################### PARCO ######################
+###################################################
+
+
+class BaseParcoDecoder(BaseDecoder):
+    key = ...
+
+    def __init__(self, pointer: nn.Module, params: MahamParams, dec_strategy = None) -> None:
+        super().__init__(params)
+        self.eval_multistep = params.eval_multistep
+        self.eval_per_agent = params.eval_per_agent
+        self.pad = params.eval_multistep
+        self.dec_strategy = dec_strategy
+        self.use_attn_mask = params.decoder_attn_mask
+        self.loss = "ce"
+        self.pointer = pointer
+
+    def forward(
+        self, 
+        embeddings: MatNetEncoderOutput, 
+        state: MSPRPState,
+        mask: torch.Tensor,
+        env: MultiAgentEnv,
+    ):
+        # get logits and mask
+        attn_mask = self.get_attn_mask(mask, state)
+        # bs, num_agents, num_actions
+        logits = self.pointer(embeddings, state, attn_mask=attn_mask)
+        # (bs * num_agents), num_actions
+        logps, step_mask = self._logits_to_logp(logits, mask)
+        # (bs * num_agents)
+        actions, logps = self.dec_strategy.step(logps, step_mask, state, key=self.key)
+        # (bs, num_agents)
+        actions = rearrange(actions, "(b a) -> b a", a=state.num_agents)
+        logps = rearrange(logps, "(b a) -> b a", a=state.num_agents)
+
+        # bs, num_agents
+        actions = self._translate_action(actions, logps, state, env)
+
+        return actions, logps
+
+
+    def get_attn_mask(self, action_mask, state):
         # in F.scaled_dot_product_attn, True mean "attend", False means not attend
         if self.use_attn_mask:  
-            return ~env.get_sku_mask(state)
+            return ~action_mask
+
+    @abc.abstractmethod
+    def _translate_action(self, action_idx: torch.Tensor, logp, state: MSPRPState, env: MultiAgentEnv) -> MultiAgentAction:
+        pass
+
+    def _logits_to_logp(self, logits, mask):
+        logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
+        if not torch.is_grad_enabled():
+            # flatten logp for selection during rollout
+            logp = rearrange(logp, "b a s -> (b a) s")
+            mask = rearrange(mask, "b a s -> (b a) s")
+        return logp, mask
+
+    def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
+        # get action indices
+        action_indices = action["idx"].clone()
+
+        # get logits and mask once
+        logits = self.pointer(embeddings, state)
+        # (bs, num_actions)
+        logp, _ = self._logits_to_logp(logits, mask)
+
+        #(bs, num_agents)
+        selected_logp = gather_by_index(logp, action_indices, dim=2, squeeze=True)
+        assert selected_logp.isfinite().all()
+        # get entropy
+        dist_entropys = Categorical(probs=logp.exp()).entropy()
+
+        return selected_logp, dist_entropys
+
+
+class ParcoShelfDecoder(BaseParcoDecoder):
+
+    key = "shelf"
+
+    def __init__(self, params, dec_strategy = None):
+        shelf_pointer = AttentionPointer(params, decoder_type="shelf")
+        super().__init__(shelf_pointer, params, dec_strategy)
+
+    def _translate_action(self, action_idx, logp, state, env):
+        bs, num_agents = action_idx.shape
+        agent_idx = torch.arange(num_agents, device=state.device, dtype=torch.long).view(1,-1).repeat(bs, 1)
+
+        precedence = torch.argsort(logp, dim=1, descending=True)
+        action_sorted = gather_by_index(action_idx.clone(), precedence)
+        actions = action_sorted.split(1, dim=-1)
+
+        visited = torch.full((bs, state.num_nodes), False, device=state.device)
+        current_locations = state.current_location.clone()
+        for i, action in enumerate(actions):
+            agent = precedence[:, i]
+            agents_current_loc = gather_by_index(current_locations, agent, dim=1, squeeze=False)
+            # NOTE check whether the agent actually moved to this postion or has been there already (in the letter case no conflict)
+            moved = (agents_current_loc != action).squeeze(1)  
+            conflict = gather_by_index(visited, action, dim=1, squeeze=True)
+            action_idx[conflict] = action_idx[conflict].scatter(1, agent[conflict, None], agents_current_loc[conflict])
+            visited[moved] = visited[moved].scatter(1, action[moved], True)
+
+        action = TensorDict(
+            {
+                "idx": action_idx, 
+                "agent": agent_idx, 
+                "shelf": action_idx,
+                "precedence": precedence
+            },
+            batch_size=(*state.batch_size, num_agents)
+        )
+        return action
+
+
+class ParcoSkuDecoder(BaseParcoDecoder):
+
+    key = "sku"
+
+    def __init__(self, params, dec_strategy = None):
+        sku_pointer = AttentionPointer(params, decoder_type="sku")
+        super().__init__(sku_pointer, params, dec_strategy)
+
+    def _translate_action(self, action_idx: torch.Tensor, logp: torch.Tensor, state: MSPRPState, env):
+        bs, num_agents = action_idx.shape
+        agent_idx = torch.arange(num_agents, device=state.device, dtype=torch.long).view(1,-1).repeat(bs, 1)
+
+        precedence = torch.argsort(logp.masked_fill(state.agent_pad_mask, float("-inf")), dim=1, descending=True)
+        action_sorted = gather_by_index(action_idx.clone(), precedence)
+        actions = action_sorted.split(1, dim=-1)
+
+        remaining_demand = state.demand_w_dummy.clone()
+        batch_idx = torch.arange(bs, device=state.device).long()
+        for i, action in enumerate(actions):
+            agent = precedence[:, i]
+            # bs (remaining demand of current agents selected sku)
+            demand_remaining = gather_by_index(remaining_demand, action, dim=1, squeeze=True)
+            # resolve conflicts by letting agents that chose an already retrieved sku select the dummy sku
+            conflict = torch.where(demand_remaining.le(0), True, False)
+            action_idx[conflict] = action_idx[conflict].scatter(1, agent[conflict, None], 0)
+            # bs (remaining capacity of current agent)
+            remaining_capacity = gather_by_index(state.remaining_capacity, agent, dim=1, squeeze=True)
+            # bs (current location of agent)
+            current_location = gather_by_index(state.current_location, agent, dim=1, squeeze=True)
+            # bs (supply of sku at agents location)
+            supply = state.supply_w_depot_and_dummy[batch_idx, current_location, action.squeeze(1)]
+            # bs (maximum retrievable by agent)
+            maybe_retrieve = torch.minimum(remaining_capacity, supply)
+            # bs (decrease demand by that amount)
+            remaining_demand[~conflict] = remaining_demand[~conflict].scatter_add(
+                1, action[~conflict], -maybe_retrieve[~conflict, None]
+            )
+
+        action = TensorDict(
+            {
+                "idx": action_idx, 
+                "agent": agent_idx, 
+                "sku": action_idx,
+                "precedence": precedence
+            },
+            batch_size=(*state.batch_size, num_agents)
+        )
+        return action
     
+
+class HierarchicalParcoDecoder(HierarchicalMultiAgentDecoder):
+
+    def __init__(self, model_params):
+        super(HierarchicalMultiAgentDecoder, self).__init__(model_params)
+        self.shelf_decoder = ParcoShelfDecoder(model_params)
+        self.sku_decoder = ParcoSkuDecoder(model_params)
+
+    def post_forward_hook(self, state: MSPRPState, env: MultiAgentEnv):
+        def flatten_list(v):
+            flat_list = []
+            for x in v:
+                flattened_list = rearrange(x, "(b a) -> b a", a=state.num_agents).split(1, dim=1)
+                flat_list.extend(list(map(lambda x: x.squeeze(1), flattened_list)))
+            return flat_list
+
+        self.dec_strategy.logp = {k: flatten_list(v) for k,v in self.dec_strategy.logp.items()}
+        self.dec_strategy.actions = {k: flatten_list(v) for k,v in self.dec_strategy.actions.items()}
+
+        logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
+        # logps = rearrange(logps, "(b a) s -> b (s a)", a=state.num_agents)
+        # actions = TensorDict(
+        #     {k: rearrange(v, "(b a) s -> b (s a)", a=state.num_agents) for k,v in actions.items()}, 
+        #     batch_size=[logps.size(0)], device=state.device
+        # )
+        return logps, actions, state

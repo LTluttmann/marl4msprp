@@ -9,7 +9,7 @@ from marlprp.env.instance import MSPRPState
 from marlprp.models.encoder import MatNetEncoder, ETEncoder
 from marlprp.models.policy_args import PolicyParams
 from marlprp.models.decoder.base import BaseDecoder
-from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder
+from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder, HierarchicalParcoDecoder
 from marlprp.models.decoder.single_agent import HierarchicalSingleAgentDecoder, Hierarchical2dPtrDecoder
 
 policy_registry = Registry()
@@ -125,12 +125,24 @@ class EquityTransformerPolicy(RoutingPolicy):
         self.decoder = HierarchicalSingleAgentDecoder(model_params)
         self.critic = None
 
+
 @policy_registry.register(name="2dptr")
 class TwoDPtrPolicy(RoutingPolicy):
     def __init__(self, model_params: PolicyParams):
         super().__init__(model_params)  
         self.encoder = MatNetEncoder(model_params)
         self.decoder = Hierarchical2dPtrDecoder(model_params)
+        self.critic = None
+
+
+
+@policy_registry.register(name="parco")
+class MultiAgentPolicy(RoutingPolicy):
+
+    def __init__(self, model_params: PolicyParams):
+        super().__init__(model_params)  
+        self.encoder = MatNetEncoder(model_params)
+        self.decoder = HierarchicalParcoDecoder(model_params)
         self.critic = None
 
 

@@ -5,3 +5,4 @@ policy:
 env:
   name: msprp
   num_agents: 1
+  goal: min-max

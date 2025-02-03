@@ -12,6 +12,7 @@ def get_init_emb_layer(params: PolicyParams):
         "ham": MultiAgentInitEmbedding,
         "maham": MultiAgentInitEmbedding,
         "2dptr": MultiAgentInitEmbedding,
+        "parco": MultiAgentInitEmbedding,
         "et": EquityTransformerInitEmbedding,
     }
 

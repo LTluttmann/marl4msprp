@@ -11,7 +11,7 @@ def get_kvl_emb(params: MahamParams, key: str = None) -> "ShelfKVL":
         "shelf": ShelfKVL,
         "sku": SkuKVL,
     }
-    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr"], kvl_layer)
+    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr", "parco"], kvl_layer)
     EmbCls = emb_registry[params.policy]
     
     if key is not None:
@@ -29,7 +29,7 @@ def get_dynamic_emb(params: MahamParams, key: str = None):
         "shelf": ShelfDynEmb,
         "sku": SkuDynEmb
     }
-    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr"], dyn_emb)
+    emb_registry = dict.fromkeys(["ham", "maham", "et", "2dptr", "parco"], dyn_emb)
 
     EmbCls = emb_registry[params.policy]
     
