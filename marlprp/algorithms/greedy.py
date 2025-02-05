@@ -23,7 +23,7 @@ instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 
 
-NUM_ITERS = 100
+NUM_ITERS = 1280
 
 
 def random__shelf_pointer(embeddings, state: MSPRPState, attn_mask = None):

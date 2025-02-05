@@ -7,7 +7,7 @@ defaults:
   - paths: default.yaml
   - env: 10s-3i-20p
   - model: sl
-  - policy: null
+  - policy: maham
   - env_list: null
 
 run_name: ${env.id}
@@ -43,3 +43,4 @@ test:
   decode_type: sampling
   gurobi_timeout: 3600
   data_dir: ${paths.test_data_dir}/luttmann
+  data_file: ${test.data_dir}/${env.id}/td_data.pth

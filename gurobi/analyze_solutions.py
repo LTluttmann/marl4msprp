@@ -12,9 +12,11 @@ solutions = {}
 if __name__ == "__main__":
     for instance_path in instance_paths:
         instance_name = instance_path.split("/")[-1]
-        solution_path = os.path.join(instance_path, "solutions.pth")
-
-        solution = torch.load(solution_path)
+        solution_path = os.path.join(instance_path, "solutions600.pth")
+        try:
+            solution = torch.load(solution_path)
+        except FileNotFoundError:
+            continue
 
         opt_sol = {k:v for k,v in solution.items() if v.is_optimal}
 

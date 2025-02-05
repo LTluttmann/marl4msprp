@@ -14,7 +14,10 @@ from .base import BaseDecoder
 from .attn import AttentionPointer
 
 
-__all__ = []
+__all__ = [
+    "HierarchicalSingleAgentDecoder",
+    "Hierarchical2dPtrDecoder"
+]
 
 class SingleAgentAction(TypedDict):
     agent: torch.Tensor  # the flat (in case of combined action space) action

@@ -8,7 +8,7 @@ from marlprp.models.policy_args import TransformerParams
 from marlprp.models.nn.init_embeddings import get_init_emb_layer
 
 from .base import BaseEncoder, MatNetEncoderOutput
-from .mixed_attention import EfficientMixedScoreMultiHeadAttention
+from .mixed_attention import EfficientMixedScoreMultiHeadAttentionLayer, MixedScoreMultiHeadAttentionLayer
 
 
 class MatNetEncoderLayer(nn.Module):
@@ -38,7 +38,10 @@ class MatNetEncoderLayer(nn.Module):
             batch_first=True,
         )
 
-        self.cross_attn = EfficientMixedScoreMultiHeadAttention(params)
+        if params.param_sharing:
+            self.cross_attn = EfficientMixedScoreMultiHeadAttentionLayer(params)
+        else:
+            self.cross_attn = MixedScoreMultiHeadAttentionLayer(params)
 
         self.shelf_norm = LayerNorm(params.embed_dim)
         self.sku_norm = LayerNorm(params.embed_dim)

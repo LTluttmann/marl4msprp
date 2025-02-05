@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
+from marlprp.models.nn.misc import PositionalEncoding
 from marlprp.models.encoder.base import MatNetEncoderOutput
 
 
@@ -48,6 +49,7 @@ class ShelfKVL(nn.Module):
         self.Wkvl = nn.Linear(params.embed_dim, 3 * params.embed_dim, bias=False)
         self.cache = None
 
+
     def compute_cache(self, embs: MatNetEncoderOutput) -> None:
         # shape: 3 * (bs, n, emb_dim)
         self.cache = self.Wkvl(embs["shelf"]).chunk(3, dim=-1)
@@ -60,7 +62,8 @@ class ShelfKVL(nn.Module):
             k, v, l = cache
             
         else:
-            k, v, l = self.Wkvl(emb["shelf"]).chunk(3, dim=-1)
+            shelf_emb = emb["shelf"]
+            k, v, l = self.Wkvl(shelf_emb).chunk(3, dim=-1)
 
         k_dyn = k + glimpse_k_dyn
         v_dyn = v + glimpse_v_dyn

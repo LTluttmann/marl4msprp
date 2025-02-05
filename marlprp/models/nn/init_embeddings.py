@@ -4,13 +4,13 @@ import torch.nn as nn
 from marlprp.utils.ops import min_max_scale
 from marlprp.env.instance import MSPRPState
 from marlprp.models.nn.misc import PositionalEncoding
-from marlprp.models.policy_args import PolicyParams, TransformerParams
+from marlprp.models.policy_args import PolicyParams, TransformerParams, MahamParams
 
 
 def get_init_emb_layer(params: PolicyParams):
     init_emb_map = {
         "ham": MultiAgentInitEmbedding,
-        "maham": MultiAgentInitEmbedding,
+        "maham": MahamInitEmbedding,
         "2dptr": MultiAgentInitEmbedding,
         "parco": MultiAgentInitEmbedding,
         "et": EquityTransformerInitEmbedding,
@@ -62,7 +62,7 @@ class MultiAgentInitEmbedding(nn.Module):
             demand_scaled,
             num_storage_loc / state.num_shelves
         ], dim=-1)
-
+        
         return self.sku_proj(feats)
     
     def _init_edge_embed(self, state: MSPRPState):
@@ -84,6 +84,23 @@ class MultiAgentInitEmbedding(nn.Module):
 
         node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
         return node_emb, sku_emb, edge_emb
+
+
+
+class MahamInitEmbedding(MultiAgentInitEmbedding):
+    def __init__(self, policy_params: MahamParams):
+        super().__init__(policy_params)
+
+        if policy_params.use_ranking_pe:
+            self.pe = PositionalEncoding(embed_dim=policy_params.embed_dim, dropout=policy_params.dropout, max_len=100)
+
+    def forward(self, tc: MSPRPState):
+        node_emb, sku_emb, edge_emb = super().forward(tc)
+        if hasattr(self, "pe"):
+            sku_ranks = torch.argsort(tc.demand, dim=1, descending=True)
+            sku_emb = self.pe(sku_emb, sku_ranks, mask=tc.demand.eq(0))
+        return node_emb, sku_emb, edge_emb
+
 
 
 class EquityTransformerInitEmbedding(MultiAgentInitEmbedding):

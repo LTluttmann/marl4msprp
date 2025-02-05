@@ -215,7 +215,9 @@ class LargeMSPRPInstanceGenerator:
         return self._simulate_batch(batch_size)
 
 if __name__ == "__main__":
-    params = LargeEnvParams()
-    gen = LargeMSPRPInstanceGenerator(params)
-    td = gen([2])
+    params = EnvParams(num_agents=None, num_depots=1, num_shelves=40, num_skus=30, num_storage_locations=100, capacity=15)
+    gen = MSPRPGenerator(params)
+    td = gen([20])
+    td["init_capacity"] = td["init_capacity"][:,0]
+    td["current_location"] = td["current_location"][:,0]
     print(td.shape)

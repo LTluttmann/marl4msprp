@@ -49,10 +49,7 @@ class BaseEnvParams:
 
     is_multi_instance: bool = False
     
-    packing_ratio_penalty: float = 0.1
-    zero_picks_penalty: float = 0.05
-
-    always_mask_depot: bool = False
+    packing_ratio_penalty: float = 0.0
 
     goal: str = None
 
@@ -119,7 +116,6 @@ class EnvParamList:
         self.envs = param_list
         self.name = "msprp"
         self.id = "multi_instance"
-        self.always_mask_depot: bool = False
         self.is_multiinstance: bool = True    
 
     def append(self, item):
@@ -371,6 +367,7 @@ class TestParams:
     num_decoding_samples: int = 100
 
     data_dir: str = None
+    data_file: str = None
     checkpoint: str = None
     seed: int = 1234567
 

@@ -77,7 +77,7 @@ class MixedScoreFF(nn.Module):
         return ms1, ms2
 
 
-class EfficientMixedScoreMultiHeadAttention(nn.Module):
+class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
     def __init__(self, model_params: TransformerParams):
         super().__init__()
 
@@ -90,9 +90,6 @@ class EfficientMixedScoreMultiHeadAttention(nn.Module):
 
         self.Wqv1 = nn.Linear(embed_dim, 2 * embed_dim, bias=False)
         self.Wkv2 = nn.Linear(embed_dim, 2 * embed_dim, bias=False)
-
-        # nn.init.xavier_uniform_(self.Wqv1.weight)
-        # nn.init.xavier_uniform_(self.Wkv2.weight)
 
         self.mixed_scores_layer = MixedScoreFF(model_params)
 
@@ -133,3 +130,79 @@ class EfficientMixedScoreMultiHeadAttention(nn.Module):
 
         return h1, h2
     
+
+
+
+class MixedScoreMultiHeadAttention(nn.Module):
+    def __init__(self, model_params: TransformerParams):
+        super().__init__()
+
+        embedding_dim = model_params.embed_dim
+        num_heads = model_params.num_heads
+        qkv_dim = model_params.qkv_dim
+
+        self.num_heads = num_heads
+        self.qkv_dim = qkv_dim
+        self.norm_factor = 1 / math.sqrt(qkv_dim)
+
+        self.Wq = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+
+        # self.init_parameters()
+
+        self.mixed_scores_layer = MixedScoreFF(model_params)
+
+
+    def forward(self, row_emb, col_emb, cost_mat):
+
+        # q shape: (batch, head_num, row_cnt, qkv_dim)
+        q = rearrange(self.Wq(row_emb), "b s (h d) -> b h s d", h=self.num_heads)
+        # kv shape: (batch, head_num, col_cnt, qkv_dim)
+        k = rearrange(self.Wk(col_emb), "b s (h d) -> b h s d", h=self.num_heads)
+        v = rearrange(self.Wv(col_emb), "b s (h d) -> b h s d", h=self.num_heads)
+
+        batch_size = q.size(0)
+        row_cnt = q.size(2)
+        col_cnt = k.size(2)
+
+        # shape: (batch, head_num, row_cnt, col_cnt)
+        dot_product_score = self.norm_factor * torch.matmul(q, k.transpose(2, 3))
+
+        # shape: (batch, head_num, row_cnt, col_cnt)
+        cost_mat_score = cost_mat[:, None, :, :].expand(batch_size, self.num_heads, row_cnt, col_cnt)
+
+        if self.mixed_scores_layer is not None:
+            mixed_scores = self.mixed_scores_layer(dot_product_score, cost_mat_score)
+        else:
+            mixed_scores = dot_product_score * cost_mat_score
+
+        # shape: (batch, head_num, row_cnt, col_cnt)
+        weights = nn.Softmax(dim=3)(mixed_scores)
+
+        # shape: (batch, head_num, row_cnt, qkv_dim)
+        out = torch.matmul(weights, v)
+
+        # shape: (batch, row_cnt, head_num, qkv_dim)
+        out_transposed = out.transpose(1, 2)
+
+        # shape: (batch, row_cnt, head_num*qkv_dim)
+        out_concat = out_transposed.reshape(batch_size, row_cnt, self.num_heads * self.qkv_dim)
+
+        return out_concat
+
+
+class MixedScoreMultiHeadAttentionLayer(nn.Module):
+    def __init__(self, model_params: TransformerParams):
+        super().__init__()
+        self.row_encoding_block = MixedScoreMultiHeadAttention(model_params)
+        self.col_encoding_block = MixedScoreMultiHeadAttention(model_params)
+
+    def forward(self, x1, x2, attn_mask = None, cost_mat = None):
+        # row_emb.shape: (batch, row_cnt, embedding)
+        # col_emb.shape: (batch, col_cnt, embedding)
+        # cost_mat.shape: (batch, row_cnt, col_cnt)
+        x1_out = self.row_encoding_block(x1, x2, cost_mat)
+        x2_out = self.col_encoding_block(x2, x1, cost_mat.transpose(1, 2))
+
+        return x1_out, x2_out

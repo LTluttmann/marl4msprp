@@ -19,6 +19,7 @@ class TransformerParams(PolicyParams):
     decoder_attn_mask: bool = False
     ms_split_heads: bool = False
     use_rezero: bool = False
+    param_sharing: bool = True
     def __post_init__(self):
         super().__post_init__()
         self.feed_forward_hidden = self.feed_forward_hidden or 2*self.embed_dim
@@ -30,6 +31,8 @@ class TransformerParams(PolicyParams):
 @dataclass(kw_only=True)
 class HAMParams(TransformerParams):
     policy: str = "ham"
+    eval_multistep: bool = False
+    eval_per_agent: bool = False
     def __post_init__(self):
         super().__post_init__()
         self.env.num_agents = 1
@@ -38,15 +41,16 @@ class HAMParams(TransformerParams):
 @dataclass(kw_only=True)
 class MahamParams(TransformerParams):
     policy: str = "maham"
+    eval_multistep: bool = True
+    eval_per_agent: bool = False
     use_communication: bool = True
-    
     use_ranking_pe: bool = False
-
+    agent_ranking: str = "learned" # random index
 
 @dataclass(kw_only=True)
 class ETParams(TransformerParams):
     policy: str = "et"
-
+    eval_multistep: bool = False
     def __post_init__(self):
         super().__post_init__()
         assert self.env.name == "ar", "EquityTransformer only works with pure autoregressive env"
@@ -55,8 +59,8 @@ class ETParams(TransformerParams):
 @dataclass(kw_only=True)
 class Ptr2DParams(TransformerParams):
     policy: str = "2dptr"
+    eval_multistep: bool = False
     use_communication: bool = True
-    use_rezero: bool = False
     use_ranking_pe: bool = False
 
     # def __post_init__(self):
@@ -66,6 +70,8 @@ class Ptr2DParams(TransformerParams):
 @dataclass(kw_only=True)
 class ParcoParams(TransformerParams):
     policy: str = "parco"
+    eval_multistep: bool = True
+    eval_per_agent: bool = True
     use_communication: bool = True
-    use_rezero: bool = False
     use_ranking_pe: bool = False
+    agent_ranking: str = "logp" # random index

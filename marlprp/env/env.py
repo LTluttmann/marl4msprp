@@ -302,9 +302,9 @@ class MultiAgentEnv:
         logp = F.log_softmax(state.packing_items, dim=-1)
         entropy = -(logp.exp() * logp).sum(1)
 
-        reward = distance + self.params.packing_ratio_penalty * entropy
+        reward = -distance #  + self.params.packing_ratio_penalty * entropy
 
-        return -reward
+        return reward
 
 
 
