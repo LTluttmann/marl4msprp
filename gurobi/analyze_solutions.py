@@ -17,8 +17,8 @@ if __name__ == "__main__":
             solution = torch.load(solution_path)
         except FileNotFoundError:
             continue
-
-        opt_sol = {k:v for k,v in solution.items() if v.is_optimal}
+        solution = {k:v for k,v in solution.items() if v is not None}
+        opt_sol = {k:v for k,v in solution.items() if v is not None and v.is_optimal}
 
         frac_opt = len(opt_sol) / len(solution)
         avg_runtime = np.mean([x.runtime for x in solution.values()])

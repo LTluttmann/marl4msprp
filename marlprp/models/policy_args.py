@@ -9,7 +9,6 @@ class TransformerParams(PolicyParams):
     feed_forward_hidden: int = None
     qkv_dim: int = field(init=False)
     input_dropout: float = 0.0 # dropout after positional encoding
-    num_decoder_ff_layers: int = 2
     activation: str = "gelu"
     norm_first: bool = False # True
     scale_supply_by_demand: bool = True
@@ -32,17 +31,13 @@ class TransformerParams(PolicyParams):
 class HAMParams(TransformerParams):
     policy: str = "ham"
     eval_multistep: bool = False
-    eval_per_agent: bool = False
-    def __post_init__(self):
-        super().__post_init__()
-        self.env.num_agents = 1
 
 
 @dataclass(kw_only=True)
 class MahamParams(TransformerParams):
     policy: str = "maham"
     eval_multistep: bool = True
-    eval_per_agent: bool = False
+    eval_per_agent: bool = True
     use_communication: bool = True
     use_ranking_pe: bool = False
     agent_ranking: str = "learned" # random index

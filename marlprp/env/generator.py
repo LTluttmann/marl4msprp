@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from tensordict import TensorDict
@@ -215,9 +216,20 @@ class LargeMSPRPInstanceGenerator:
         return self._simulate_batch(batch_size)
 
 if __name__ == "__main__":
-    params = EnvParams(num_agents=None, num_depots=1, num_shelves=40, num_skus=30, num_storage_locations=100, capacity=15)
+    params = EnvParams(
+        num_agents=None, 
+        num_depots=1, 
+        num_shelves=50, 
+        num_skus=500, 
+        num_storage_locations=1000, 
+        capacity=15
+    )
     gen = MSPRPGenerator(params)
     td = gen([20])
     td["init_capacity"] = td["init_capacity"][:,0]
     td["current_location"] = td["current_location"][:,0]
-    print(td.shape)
+    
+    save_dir = os.path.join("data_test/ood", gen.id)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    torch.save(td, os.path.join(save_dir, "td_data.pth"))

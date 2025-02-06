@@ -1,4 +1,8 @@
 # @package _global_
+defaults:
+  - base@policy
+
+  
 policy:
   policy: maham
   use_ranking_pe: True
@@ -10,3 +14,4 @@ env:
 
 model:
   eval_per_agent: True
+  eval_multistep: True

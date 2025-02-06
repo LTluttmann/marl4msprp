@@ -20,6 +20,7 @@ from marlprp.env.env import MultiAgentEnv
 from marlprp.models.policies import RoutingPolicy
 from marlprp.utils.utils import monitor_lr_changes
 from marlprp.utils.logger import get_lightning_logger
+from marlprp.utils.data import environment_distribution
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
 from marlprp.utils.ops import all_gather_w_padding, all_gather_numeric
 from marlprp.algorithms.utils import NumericParameter, make_replay_buffer
@@ -296,11 +297,11 @@ class LearningAlgorithm(LightningModule):
                 num_agents=self.model_params.policy.env.num_agents
             )
         except FileNotFoundError as e:
-            self.pylogger.warning(e.__str__())
             test_file_dls = {}
 
-        test_dl = self._get_dataloader(self.test_params)
-        test_file_dls["synthetic"] = test_dl
+        if self.test_params.dataset_size > 0:
+            test_dl = self._get_dataloader(self.test_params)
+            test_file_dls["synthetic"] = test_dl
 
         keys, values = list(test_file_dls.keys()), list(test_file_dls.values())
         self.test_set_names = keys
@@ -470,8 +471,9 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         
     @property
     def generator_distribution(self):
-        step_t = self.current_epoch / max(1, self.trainer.max_epochs - 10)
-        return (1-step_t) * self.init_dist + step_t * self.tgt_dist
+        env_sizes = [gen.size for gen in self.env.generators]
+        epochs_until_uniform = self.trainer.max_epochs-10
+        return environment_distribution(np.log(env_sizes), self.current_epoch, epochs_until_uniform, beta=5, temperature=1)
 
 
     @property

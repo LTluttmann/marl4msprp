@@ -73,7 +73,7 @@ class MultiAgentInitEmbedding(nn.Module):
                 torch.clamp(state.supply_w_depot.clone() / state.demand[:, None], max=1) # supply more than 100% of demand is irrelevant
             )
         else:
-            supply_scaled = state.supply_w_depot.clone() / state.capacity[..., None]
+            supply_scaled = state.supply_w_depot.clone() / state.capacity
         return supply_scaled
     
     def forward(self, tc: MSPRPState):

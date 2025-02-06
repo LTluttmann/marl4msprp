@@ -82,9 +82,9 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
         return action
     
     def _get_attn_mask(self, action_mask: torch.Tensor, state: MSPRPState):
-        bs, n_agents, n_actions = action_mask.shape
+        # bs, n_agents, n_actions = action_mask.shape
         if self.use_attn_mask:
-            attn_mask = ~action_mask.gather(1, state.active_agent.view(bs, 1, 1).expand(bs, n_actions))
+            attn_mask = ~action_mask # .gather(1, state.active_agent.view(bs, 1, 1).expand(bs, n_actions))
         else:
             attn_mask = None
         return attn_mask

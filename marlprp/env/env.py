@@ -367,7 +367,7 @@ class AREnv(MultiAgentEnv):
         nans in the softmax (necessary when not all instances in the batch are done)
         
         Returns:
-            agent_node_mask: shape = (bs, num_agents, num_shelves+1)
+            agent_node_mask: shape = (bs, num_agents, num_nodes+1)
         """
         # (bs, 1)
         current_agent = state.active_agent
@@ -377,9 +377,9 @@ class AREnv(MultiAgentEnv):
         remaining_agent_capacity = remaining_agents * state.capacity
         # (bs, 1)
         has_no_capacity = state.remaining_capacity.gather(1, current_agent).eq(0)
-        # (bs, num_shelves)
+        # (bs, num_nodes)
         mask_loc = (state.demand[:, None, :].lt(1e-6) |  state.supply.lt(1e-6)).all(-1)
-        # (bs, 1, num_shelves)
+        # (bs, 1, num_nodes)
         mask_loc_and_agent = has_no_capacity[..., None] | mask_loc[:, None]
         
         remaining_demand = state.demand.sum(-1)
@@ -391,7 +391,7 @@ class AREnv(MultiAgentEnv):
         finished = current_agent_position.lt(state.num_depots) & no_more_demand[:, None]
         finished_agents_positions = current_agent_position[finished]
         mask_depot[finished] = mask_depot[finished].scatter(-1, finished_agents_positions[:, None], False)
-        # (bs, num_agents, num_nodes)
+        # (bs, 1, num_nodes)
         agent_node_mask = torch.cat((mask_depot, mask_loc_and_agent), 2).bool()
         return agent_node_mask
         

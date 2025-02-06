@@ -6,7 +6,7 @@ from marlprp.env.instance import MSPRPState
 from marlprp.utils.ops import gather_by_index
 from marlprp.utils.config import PolicyParams
 from marlprp.models.nn.misc import PositionalEncoding
-from marlprp.models.policy_args import TransformerParams, MahamParams
+from marlprp.models.policy_args import TransformerParams, MahamParams, HAMParams
 from marlprp.models.encoder.base import MatNetEncoderOutput, ETEncoderOutput
 
 
@@ -18,8 +18,8 @@ def get_context_emb(params: PolicyParams, key: str = None):
             "sku": MahamAgentContext
         },
         "ham": {
-            "shelf": MultiAgentContext,
-            "sku": MultiAgentContext
+            "shelf": SingleAgentContext,
+            "sku": SingleAgentContext
         },
         "et": {
             "shelf": EquityTransformerContext,
@@ -43,15 +43,6 @@ def get_context_emb(params: PolicyParams, key: str = None):
     return EmbCls(params)
 
 
-class Context(nn.Module):
-
-
-    def __init__(self, params: PolicyParams):
-        super(Context, self).__init__()
-
-    def forward(self, td):
-        pass
-
 
 class MultiAgentContext(nn.Module):
 
@@ -61,21 +52,15 @@ class MultiAgentContext(nn.Module):
         self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_communication and (params.env.num_agents is None or params.env.num_agents > 1):
             self.comm_layer = CommunicationLayer(params)
-        if params.use_ranking_pe:
-            self.pe = PositionalEncoding(embed_dim=params.embed_dim, dropout=params.dropout, max_len=1000)
 
     def agent_state_emb(self, state: MSPRPState):
         feats = torch.stack([
             state.remaining_capacity / state.capacity,
             (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
-            #state.demand.sum(1, keepdims=True) / (state.remaining_capacity + 1e-7),
             state.tour_length - state.tour_length.max(1, keepdim=True).values
         ], dim=-1)
         state_emb = self.proj_agent_state(feats)
-        if hasattr(self, "pe"):
-            # rank based on tour length
-            agent_ranks = torch.argsort(state.tour_length, dim=1, descending=True)
-            state_emb = self.pe(state_emb, agent_ranks, mask=state.agent_pad_mask)
+
         return state_emb
 
     def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
@@ -89,7 +74,7 @@ class MultiAgentContext(nn.Module):
         agent_emb = torch.cat((current_loc_emb, state_emb), dim=-1)
         agent_emb = self.proj_agent(agent_emb)
         if hasattr(self, "comm_layer"):
-            agent_emb = self.comm_layer(agent_emb)
+            agent_emb = self.comm_layer(agent_emb, state)
         return agent_emb
 
 
@@ -98,10 +83,20 @@ class MahamAgentContext(MultiAgentContext):
         super().__init__(params)
         self.problem_proj = nn.Linear(params.embed_dim, params.embed_dim, bias=params.bias)
         self.proj_agent = nn.Linear(3 * params.embed_dim, params.embed_dim, bias=params.bias)
+        if params.use_ranking_pe:
+            self.pe = PositionalEncoding(embed_dim=params.embed_dim, dropout=params.dropout, max_len=1000)
 
+    def agent_state_emb(self, state):
+        """add positional encoding"""
+        state_emb = super().agent_state_emb(state)
+        if hasattr(self, "pe"):
+            # rank based on tour length
+            agent_ranks = torch.argsort(state.tour_length, dim=1, descending=True)
+            state_emb = self.pe(state_emb, agent_ranks, mask=state.agent_pad_mask)
+        return state_emb
 
     def problem_emb(self, emb: MatNetEncoderOutput, state: MSPRPState):
-        """Add a graph embedding as detailed in the PARCO paper"""
+        """Add a graph embedding"""
         graph_emb = torch.cat((emb["shelf"], emb["sku"]), dim=1)
         graph_emb = self.problem_proj(graph_emb.mean(1, keepdim=True))
         return graph_emb
@@ -122,8 +117,43 @@ class MahamAgentContext(MultiAgentContext):
             agent_ranks = torch.argsort(state.remaining_capacity, dim=1, descending=True)
             agent_emb = self.pe(agent_emb, agent_ranks, mask=state.agent_pad_mask)
         if hasattr(self, "comm_layer"):
-            agent_emb = self.comm_layer(agent_emb)
+            agent_emb = self.comm_layer(agent_emb, state)
         return agent_emb
+
+
+
+class SingleAgentContext(nn.Module):
+
+    def __init__(self, params: HAMParams):
+        super().__init__()
+        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
+        self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
+
+    def agent_state_emb(self, state: MSPRPState):
+        remaining_capacity = state.remaining_capacity.gather(1, state.active_agent)
+        feats = torch.stack([
+            remaining_capacity / state.capacity,
+            state.demand.sum(1, keepdim=True) / state.capacity,
+            state.tour_length.gather(1, state.active_agent)
+        ], dim=-1)
+        state_emb = self.proj_agent_state(feats)
+        return state_emb
+
+    def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
+        shelf_emb = emb["shelf"]
+        # bs, 1
+        current_agents_loc = state.current_location.gather(1, state.active_agent)
+        # get embedding of current location of agents
+        # bs, 1, emb
+        current_loc_emb = gather_by_index(shelf_emb, current_agents_loc, dim=1, squeeze=False)
+        # get embedding for agent state
+        state_emb = self.agent_state_emb(state)
+        # cat and project
+        agent_emb = torch.cat((current_loc_emb, state_emb), dim=-1)
+        agent_emb = self.proj_agent(agent_emb)
+        return agent_emb
+    
+
 
 
 class EquityTransformerContext(nn.Module):
@@ -199,11 +229,12 @@ class EquityTransformerContext(nn.Module):
         agent_emb = self.proj_agent(agent_emb)
         return agent_emb
     
-    
+
 
 class CommunicationLayer(nn.Module):
     def __init__(self, params: TransformerParams) -> None:
         super().__init__()
+        self.num_heads = params.num_heads
         self.comm_layer = TransformerEncoderLayer(
             d_model=params.embed_dim,
             nhead=params.num_heads,
@@ -215,6 +246,14 @@ class CommunicationLayer(nn.Module):
             bias=params.bias
         )
 
-    def forward(self, x):
-        h = self.comm_layer(x)
+    def forward(self, x, state: MSPRPState):
+        #  bs, num_agents
+        pad_mask = state.agent_pad_mask
+        #  bs * num_heads, num_agents
+        attn_mask = state.remaining_capacity.eq(0).repeat_interleave(
+            self.num_heads, dim=0
+        )
+        #  bs * num_heads, num_agents, num_agents
+        attn_mask = attn_mask.unsqueeze(1).expand((-1, state.num_agents, state.num_agents))
+        h = self.comm_layer(x, src_mask=attn_mask, src_key_padding_mask=pad_mask)
         return h

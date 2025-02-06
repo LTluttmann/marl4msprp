@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
 
     pl.seed_everything(test_params.seed)
 
-    ckpt = torch.load(model_path)
+    ckpt = torch.load(model_path, map_location=torch.device('cpu'))
     env = MultiAgentEnv.initialize(params=instance_params)
     policy = RoutingPolicy.initialize(policy_params)
 
@@ -58,8 +58,12 @@ def main(cfg: DictConfig):
 
     model = EvalModule(env, policy, model_params, test_params)
 
-    logger = get_wandb_logger(cfg, model_params, hc, model, eval_only=True)
-
+    if cfg.get("logger", None) is not None:
+        log.info("Instantiating loggers...")
+        logger = get_wandb_logger(cfg, model_params, hc, model, eval_only=True)
+    else:
+        logger = None
+        
     trainer = RL4COTrainer(
         accelerator=trainer_params.accelerator,
         devices=trainer_params.devices,

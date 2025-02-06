@@ -18,7 +18,7 @@ from marlprp.decoding.strategies import get_decoding_strategy
 
 
 root = pyrootutils.find_root(__file__, indicator=".gitignore")
-data_path = os.path.join(root, "data_test/luttmann/")
+data_path = os.path.join(root, "data_test/ood/")
 instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 
