@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import hydra
 import pyrootutils
@@ -37,13 +38,23 @@ def main(cfg: DictConfig):
     model_path = os.path.join(old_run_path, "checkpoints", "last.ckpt")
     assert os.path.exists(model_path), f"No checkpoint found in {model_path}"
 
-    instance_params = EnvParams.initialize(**cfg.env)
+    if hasattr(cfg, "test_env"):
+        from hydra.core.global_hydra import GlobalHydra
+        from hydra.experimental import compose, initialize_config_dir
+        # Re-initialize Hydra with the main config path to extend it
+        GlobalHydra.instance().clear()  # Reset Hydra
+        hydra.initialize(config_path="../configs")  # Adjust to your main config location
+        # Load the new environment config
+        new_cfg = compose(config_name="main.yaml", overrides=[f"env={cfg.test_env}"])
+        test_env = OmegaConf.to_container(new_cfg.get("env"))
+        test_env.pop("name")
+        instance_params = EnvParams.initialize(name=cfg.env.name, **test_env)
+    else:
+        instance_params = EnvParams.initialize(**cfg.env)
     trainer_params = TrainingParams(**cfg.train)
     test_params = TestParams(**cfg.test)
     policy_params = PolicyParams.initialize(env=instance_params, **cfg.policy)
     model_params = ModelParams.initialize(policy_params=policy_params, **cfg.model)
-
-    pl.seed_everything(test_params.seed)
 
     ckpt = torch.load(model_path, map_location=torch.device('cpu'))
     env = MultiAgentEnv.initialize(params=instance_params)
@@ -54,7 +65,13 @@ def main(cfg: DictConfig):
         for k,v in ckpt["state_dict"].items() 
         if k.startswith("policy.")
     }
-    policy.load_state_dict(policy_state_dict)   
+    try:
+        policy.load_state_dict(policy_state_dict)   
+    except:
+        from marlprp.models.nn.misc import PositionalEncoding
+        pe = PositionalEncoding(256, 0.0, 1000)
+        policy_state_dict["encoder.init_embedding.pe.pe"] = pe.state_dict()["pe"]
+        policy.load_state_dict(policy_state_dict) 
 
     model = EvalModule(env, policy, model_params, test_params)
 
@@ -83,4 +100,7 @@ def main(cfg: DictConfig):
 
 
 if __name__ == "__main__":
+     start = time.time()
      main()
+     duration = time.time() - start
+     print("Duration: ", duration)

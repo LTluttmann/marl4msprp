@@ -48,7 +48,7 @@ class MultiAgentContext(nn.Module):
 
     def __init__(self, params: MahamParams):
         super().__init__()
-        self.proj_agent_state = nn.Linear(3, params.embed_dim, bias=params.bias)
+        self.proj_agent_state = nn.Linear(2, params.embed_dim, bias=params.bias)
         self.proj_agent = nn.Linear(2 * params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_communication and (params.env.num_agents is None or params.env.num_agents > 1):
             self.comm_layer = CommunicationLayer(params)
@@ -56,7 +56,6 @@ class MultiAgentContext(nn.Module):
     def agent_state_emb(self, state: MSPRPState):
         feats = torch.stack([
             state.remaining_capacity / state.capacity,
-            (state.demand.sum(1, keepdim=True) / state.capacity).expand_as(state.remaining_capacity),
             state.tour_length - state.tour_length.max(1, keepdim=True).values
         ], dim=-1)
         state_emb = self.proj_agent_state(feats)
@@ -81,7 +80,7 @@ class MultiAgentContext(nn.Module):
 class MahamAgentContext(MultiAgentContext):
     def __init__(self, params):
         super().__init__(params)
-        self.problem_proj = nn.Linear(params.embed_dim, params.embed_dim, bias=params.bias)
+        self.problem_proj = nn.Linear(1, params.embed_dim, bias=params.bias)
         self.proj_agent = nn.Linear(3 * params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_ranking_pe:
             self.pe = PositionalEncoding(embed_dim=params.embed_dim, dropout=params.dropout, max_len=1000)
@@ -97,9 +96,19 @@ class MahamAgentContext(MultiAgentContext):
 
     def problem_emb(self, emb: MatNetEncoderOutput, state: MSPRPState):
         """Add a graph embedding"""
-        graph_emb = torch.cat((emb["shelf"], emb["sku"]), dim=1)
-        graph_emb = self.problem_proj(graph_emb.mean(1, keepdim=True))
-        return graph_emb
+        # bs, 1
+        remaining_demand = state.demand.sum(1, keepdim=True)
+        # bs, n_agents
+        demand_agent_view = (remaining_demand / state.capacity).expand_as(state.remaining_capacity)
+        # bs, n_sku
+        weights = state.demand / (remaining_demand + 1e-6)
+        # bs, 1, emb
+        weighted_avg = torch.sum(weights.unsqueeze(-1) * emb["sku"], dim=1, keepdim=True)
+        # bs, num_agents, emb
+        weighted_avg = weighted_avg.expand(-1, state.num_agents, -1)
+        # bs, num_agents, emb
+        demand_proj = self.problem_proj(demand_agent_view.unsqueeze(-1))
+        return demand_proj # + weighted_avg
 
     def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
         shelf_emb = emb["shelf"]
@@ -108,18 +117,17 @@ class MahamAgentContext(MultiAgentContext):
         current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
         # get embedding for agent state
         state_emb = self.agent_state_emb(state)
-        problem_emb = self.problem_emb(emb, state).expand_as(state_emb)
+        problem_emb = self.problem_emb(emb, state)
         # cat and project
         agent_emb = torch.cat((current_loc_emb, state_emb, problem_emb), dim=-1)
         agent_emb = self.proj_agent(agent_emb)
-        if hasattr(self, "pe"):
-            # rank based on capacity
-            agent_ranks = torch.argsort(state.remaining_capacity, dim=1, descending=True)
-            agent_emb = self.pe(agent_emb, agent_ranks, mask=state.agent_pad_mask)
+        # if hasattr(self, "pe"):
+        #     # rank based on capacity
+        #     agent_ranks = torch.argsort(state.remaining_capacity, dim=1, descending=True)
+        #     agent_emb = self.pe(agent_emb, agent_ranks, mask=state.agent_pad_mask)
         if hasattr(self, "comm_layer"):
             agent_emb = self.comm_layer(agent_emb, state)
         return agent_emb
-
 
 
 class SingleAgentContext(nn.Module):
@@ -153,7 +161,6 @@ class SingleAgentContext(nn.Module):
         agent_emb = self.proj_agent(agent_emb)
         return agent_emb
     
-
 
 
 class EquityTransformerContext(nn.Module):
@@ -241,7 +248,7 @@ class CommunicationLayer(nn.Module):
             dim_feedforward=params.feed_forward_hidden,
             dropout=params.dropout,
             activation=params.activation,
-            norm_first=True,
+            norm_first=params.norm_first,
             batch_first=True,
             bias=params.bias
         )

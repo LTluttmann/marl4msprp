@@ -108,7 +108,10 @@ class MSPRPGenerator:
 
     def __call__(self, batch_size) -> TensorDict:
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
-        return self._simulate_batch(batch_size)
+        while True:
+            td = self._simulate_batch(batch_size)
+            if not td["demand"].eq(0).all(1).any():
+                return td
 
 
 class LargeMSPRPInstanceGenerator:
@@ -213,15 +216,18 @@ class LargeMSPRPInstanceGenerator:
 
     def __call__(self, batch_size) -> TensorDict:
         batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
-        return self._simulate_batch(batch_size)
+        while True:
+            td = self._simulate_batch(batch_size)
+            if not td["demand"].eq(0).all():
+                return td
 
 if __name__ == "__main__":
     params = EnvParams(
         num_agents=None, 
         num_depots=1, 
         num_shelves=50, 
-        num_skus=500, 
-        num_storage_locations=1000, 
+        num_skus=100, 
+        num_storage_locations=200, 
         capacity=15
     )
     gen = MSPRPGenerator(params)

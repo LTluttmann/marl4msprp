@@ -1,10 +1,10 @@
+import torch
+
 import os
 import time
-import torch
 import pyrootutils
+from tqdm import tqdm 
 from functools import partial
-from marlprp.utils.ops import batchify, unbatchify, gather_by_index
-
 from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
@@ -15,6 +15,7 @@ from marlprp.models.decoder.multi_agent import (
     HierarchicalMultiAgentDecoder, MultiAgentShelfDecoder, MultiAgentSkuDecoder
 )
 from marlprp.decoding.strategies import get_decoding_strategy
+from marlprp.utils.ops import batchify, unbatchify, gather_by_index
 
 
 root = pyrootutils.find_root(__file__, indicator=".gitignore")
@@ -23,7 +24,7 @@ instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 
 
-NUM_ITERS = 1280
+NUM_ITERS = 200
 
 
 def random__shelf_pointer(embeddings, state: MSPRPState, attn_mask = None):
@@ -71,7 +72,7 @@ def get_random_baseline(instance_path):
     random_policy = RandomHierarchicalPolicy(model_params)
 
     rewards = []
-    for td, _ in dl:
+    for td, _ in tqdm(dl):
         state = env.reset(td)
         state = batchify(state, NUM_ITERS)
         i = 0
@@ -94,13 +95,20 @@ if __name__ == "__main__":
     torch.manual_seed(1234567)
     solutions = {}
     for instance_path in instance_paths:
+        print("Processing test files in folder: ", instance_path)
         instance_name = instance_path.split("/")[-1]
         start_time = time.time()
         rewards = get_random_baseline(instance_path)
         duration = time.time() - start_time
-        solutions[instance_name] = {
-            "avg_reward": rewards.mean().item(),
-            "avg_runtime": duration / rewards.numel()
-        }
-
-    print(solutions)
+        # solutions[instance_name] = {
+        #     "avg_reward": rewards.mean().item(),
+        #     "avg_runtime": duration / rewards.numel()
+        # }
+        torch.save(
+            obj={
+                "avg_reward": rewards.mean().item(),
+                "avg_runtime": duration / rewards.numel()
+            },
+            f=os.path.join(instance_path, "greedy.pth")
+        )
+    # print(solutions)

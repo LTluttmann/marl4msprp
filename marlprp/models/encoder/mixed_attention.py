@@ -31,7 +31,7 @@ def apply_weights_and_combine(
         logits = logits.masked_fill(mask, float("-inf"))
 
     # shape: (batch, num_heads, row_cnt, col_cnt)
-    weights = nn.Softmax(dim=-1)(logits)
+    weights = torch.softmax(logits, dim=-1)
 
     # shape: (batch, num_heads, row_cnt, qkv_dim)
     out = torch.matmul(weights, v)
@@ -120,7 +120,7 @@ class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
             ms1, ms2 = self.mixed_scores_layer(dot, cost_mat_score)
 
         if attn_mask is not None:
-            mask1 = ~attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(ms1)
+            mask1 = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(ms1)
             mask2 = mask1.transpose(-2, -1)
         else:
             mask1, mask2 = None, None
@@ -130,7 +130,6 @@ class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
 
         return h1, h2
     
-
 
 
 class MixedScoreMultiHeadAttention(nn.Module):
@@ -155,7 +154,7 @@ class MixedScoreMultiHeadAttention(nn.Module):
         self.mixed_scores_layer = MixedScoreFF(model_params)
 
 
-    def forward(self, row_emb, col_emb, cost_mat):
+    def forward(self, row_emb, col_emb, cost_mat, attn_mask = None):
 
         # q shape: (batch, head_num, row_cnt, qkv_dim)
         q = rearrange(self.Wq(row_emb), "b s (h d) -> b h s d", h=self.num_heads)
@@ -175,22 +174,12 @@ class MixedScoreMultiHeadAttention(nn.Module):
 
         mixed_scores, _ = self.mixed_scores_layer(dot_product_score, cost_mat_score)
 
-        # shape: (batch, head_num, row_cnt, col_cnt)
-        weights = torch.softmax(mixed_scores, dim=3)
-
-        # shape: (batch, head_num, row_cnt, qkv_dim)
-        out = torch.matmul(weights, v)
-
-        # shape: (batch, row_cnt, head_num, qkv_dim)
-        out_transposed = out.transpose(1, 2)
-
-        # shape: (batch, row_cnt, head_num*qkv_dim)
-        out_concat = out_transposed.reshape(batch_size, row_cnt, self.num_heads * self.qkv_dim)
-
-        return self.out_proj1(out_concat)
+        out = self.out_proj1(apply_weights_and_combine(mixed_scores, v, mask=attn_mask))
+        return out
 
 
 class MixedScoreMultiHeadAttentionLayer(nn.Module):
+
     def __init__(self, model_params: TransformerParams):
         super().__init__()
         self.row_encoding_block = MixedScoreMultiHeadAttention(model_params)
