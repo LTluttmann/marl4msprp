@@ -56,6 +56,8 @@ def main(cfg: DictConfig):
     policy_params = PolicyParams.initialize(env=instance_params, **cfg.policy)
     model_params = ModelParams.initialize(policy_params=policy_params, **cfg.model)
 
+    pl.seed_everything(48123)
+
     ckpt = torch.load(model_path, map_location=torch.device('cpu'))
     env = MultiAgentEnv.initialize(params=instance_params)
     policy = RoutingPolicy.initialize(policy_params)

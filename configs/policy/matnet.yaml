@@ -1,6 +1,0 @@
-# @package _global_
-policy:
-  policy: matnet
-  
-env:
-  multiagent: False

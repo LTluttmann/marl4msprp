@@ -194,7 +194,7 @@ def get_file_dataloader(env, batch_size: int, file_dir: Union[dict, str] = None,
                 env=env,
                 path=file_dir, 
                 batch_size=batch_size,
-                read_fn=partial(read_luttmann, num_agents=num_agents)
+                read_fn=partial(read_icaps_instances, num_agents=num_agents)
             )
             for file_name, file_dir in file_dir.items()
         }
@@ -203,14 +203,14 @@ def get_file_dataloader(env, batch_size: int, file_dir: Union[dict, str] = None,
             env=env,
             path=file_dir, 
             batch_size=batch_size,
-            read_fn=partial(read_luttmann, num_agents=num_agents)
+            read_fn=partial(read_icaps_instances, num_agents=num_agents)
         )
     else:
         raise ValueError(f"Expected str or dict for param file_dir, got {file_dir}")
     return dataloader
 
 
-def read_luttmann(path, num_agents):
+def read_icaps_instances(path, num_agents):
     td = torch.load(path)
     bs = td.batch_size
     # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)

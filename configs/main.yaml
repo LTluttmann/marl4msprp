@@ -42,5 +42,5 @@ test:
   num_decoding_samples: 1280 
   decode_type: sampling
   gurobi_timeout: 3600
-  data_dir: ${paths.test_data_dir}/luttmann
+  data_dir: ${paths.test_data_dir}/icaps
   data_file: ${test.data_dir}/${env.id}/td_data.pth

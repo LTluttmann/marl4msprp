@@ -108,7 +108,7 @@ class LearningAlgorithm(LightningModule):
     @property
     def test_data_dirs(self):
         dir_fn = lambda instance: os.path.join(self.test_params.data_dir, instance, "td_data.pth")
-        return {f"luttmann/{g.id}": dir_fn(g.id) for g in self.env.generators}
+        return {f"icaps/{g.id}": dir_fn(g.id) for g in self.env.generators}
 
     @classmethod
     def initialize(

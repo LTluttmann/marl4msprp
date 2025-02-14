@@ -9,7 +9,7 @@ from marlprp.env.env import MultiAgentEnv
 from marlprp.utils.config import EnvParams
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
-from marlprp.utils.dataset import EnvLoader, read_luttmann
+from marlprp.utils.dataset import EnvLoader, read_icaps_instances
 from marlprp.models.decoder.base import BaseDecoder
 from marlprp.models.decoder.multi_agent import (
     HierarchicalMultiAgentDecoder, MultiAgentShelfDecoder, MultiAgentSkuDecoder
@@ -19,12 +19,12 @@ from marlprp.utils.ops import batchify, unbatchify, gather_by_index
 
 
 root = pyrootutils.find_root(__file__, indicator=".gitignore")
-data_path = os.path.join(root, "data_test/ood/")
+data_path = os.path.join(root, "data_test/icaps/")
 instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 
 
-NUM_ITERS = 200
+NUM_ITERS = 1280
 
 
 def random__shelf_pointer(embeddings, state: MSPRPState, attn_mask = None):
@@ -65,7 +65,7 @@ def get_random_baseline(instance_path):
         env, 
         batch_size=1, 
         path=solution_path,
-        read_fn=partial(read_luttmann, num_agents=None)
+        read_fn=partial(read_icaps_instances, num_agents=None)
     )
 
     model_params = MahamParams(policy="random", env=env_params, decoder_attn_mask=True)
