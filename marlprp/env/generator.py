@@ -128,7 +128,7 @@ if __name__ == "__main__":
     td["init_capacity"] = td["init_capacity"][:,0]
     td["current_location"] = td["current_location"][:,0]
     
-    save_dir = os.path.join("data_test/ood", gen.id)
+    save_dir = os.path.join("data_test/large", gen.id)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     torch.save(td, os.path.join(save_dir, "td_data.pth"))
