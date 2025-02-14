@@ -1,0 +1,5 @@
+algorithm: ppo
+inner_epochs: 5
+eval_per_agent: False
+eval_multistep: False
+rollout_batch_size: 1000

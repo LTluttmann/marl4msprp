@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - base@policy
+
+  
+policy:
+  policy: parco
+  agent_ranking: logp
+  decoder_attn_mask: False
+  scale_supply_by_demand: True
+
+env:
+  name: msprp
+  num_agents: null
+  goal: min-max

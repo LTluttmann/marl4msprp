@@ -1,0 +1,9 @@
+# @package _global_
+model:
+  algorithm: reinforce
+  baseline: pomo
+  num_starts: 10
+
+train:
+  batch_size: 250
+  dataset_size: 200_000

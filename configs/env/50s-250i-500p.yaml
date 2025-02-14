@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - base_env@env
+  
+env:
+  num_shelves: 50
+  num_skus: 250
+  num_storage_locations: 500
+  capacity: 15
+
+
+test:
+  data_dir: ${paths.test_data_dir}/large

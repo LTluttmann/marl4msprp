@@ -1,0 +1,7 @@
+defaults:
+  - base_env
+  
+num_shelves: 40
+num_skus: 20
+num_storage_locations: 100
+capacity: 15

@@ -1,0 +1,5 @@
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.LocalLauncher
+gpus_per_task: 1    # Limit each job to one GPU
+tasks_per_node: 5   # Match the number of GPUs per machine
+array_parallelism: 5  # Maximum parallel jobs (to match GPU count)
+submitit_folder: ${output_dir}/submitit

@@ -1,0 +1,9 @@
+# @package env_list.10s_6i_20p
+
+defaults:
+  - base_env
+
+num_shelves: 10
+num_skus: 6
+num_storage_locations: 20
+capacity: 9

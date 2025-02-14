@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - base@policy
+
+policy:
+  policy: 2dptr
+
+env:
+  name: sa
+  num_agents: null
+  goal: min-max

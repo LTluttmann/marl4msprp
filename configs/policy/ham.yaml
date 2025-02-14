@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - base@policy
+
+policy:
+  policy: ham
+  
+env:
+  name: ar
+  num_agents: null
+  goal: min-max
