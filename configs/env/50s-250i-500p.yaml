@@ -10,4 +10,4 @@ env:
 
 
 test:
-  data_dir: ${paths.test_data_dir}/ood
+  data_dir: ${paths.test_data_dir}/large

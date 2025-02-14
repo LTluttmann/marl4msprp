@@ -9,4 +9,4 @@ env:
   capacity: 15
 
 test:
-  data_dir: ${paths.test_data_dir}/ood
+  data_dir: ${paths.test_data_dir}/large
