@@ -1,14 +1,10 @@
-import math
 import torch
-from scipy import stats
 from dataclasses import dataclass
-from tensordict import TensorDict
-from typing import Generator, Optional, Callable, Union, Type
+from typing import Optional, Callable, Union, Type
 
 from torchrl.data.replay_buffers import (
     LazyMemmapStorage,
     ListStorage,
-    SamplerWithoutReplacement,
     TensorDictReplayBuffer,
     TensorDictPrioritizedReplayBuffer,
     ReplayBuffer
@@ -55,31 +51,31 @@ def make_replay_buffer(
     return rb
 
 
-def one_sided_independent_t_test(candidate_rewards, ref_rewards):
-    # Step 1: gather first and second order statistics
-    a_mean = torch.mean(candidate_rewards).item()
-    a_var = torch.var(candidate_rewards, unbiased=True)  # unbiased for sample var
+# def one_sided_independent_t_test(candidate_rewards, ref_rewards):
+#     # Step 1: gather first and second order statistics
+#     a_mean = torch.mean(candidate_rewards).item()
+#     a_var = torch.var(candidate_rewards, unbiased=True)  # unbiased for sample var
 
-    b_mean = torch.mean(ref_rewards).item()
-    b_var = torch.var(ref_rewards, unbiased=True) # unbiased for sample var
+#     b_mean = torch.mean(ref_rewards).item()
+#     b_var = torch.var(ref_rewards, unbiased=True) # unbiased for sample var
 
-    # Step 2: Calculate the t-statistic for a one-sample t-test
-    # 2.1 determine degrees of freedom
-    na = candidate_rewards.size(0)
-    nb = ref_rewards.size(0)
-    df = na + nb - 2
-    # 2.2 numerator
-    dm = a_mean - b_mean
-    # 2.3 pooled variance and denominator
-    pooled_v = (((na-1) * a_var) + ((nb-1) * b_var)) / df
-    denom = torch.sqrt(pooled_v) * math.sqrt(1/na + 1/nb)
-    # t-statistic formula
-    t_stat = dm / denom
+#     # Step 2: Calculate the t-statistic for a one-sample t-test
+#     # 2.1 determine degrees of freedom
+#     na = candidate_rewards.size(0)
+#     nb = ref_rewards.size(0)
+#     df = na + nb - 2
+#     # 2.2 numerator
+#     dm = a_mean - b_mean
+#     # 2.3 pooled variance and denominator
+#     pooled_v = (((na-1) * a_var) + ((nb-1) * b_var)) / df
+#     denom = torch.sqrt(pooled_v) * math.sqrt(1/na + 1/nb)
+#     # t-statistic formula
+#     t_stat = dm / denom
 
-    # Step 3: determine p value
-    cdf = stats.t.cdf(t_stat.cpu().numpy(), df=df)
-    p_value = 1 - cdf
-    return p_value
+#     # Step 3: determine p value
+#     cdf = stats.t.cdf(t_stat.cpu().numpy(), df=df)
+#     p_value = 1 - cdf
+#     return p_value
 
 
 class RewardScaler:
