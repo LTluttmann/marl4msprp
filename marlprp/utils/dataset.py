@@ -1,7 +1,10 @@
+from typing import Union
 from omegaconf import DictConfig
 from functools import partial
+
 import torch
 import numpy as np
+
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import Sampler
 from marlprp.env.env import MultiAgentEnv
@@ -181,35 +184,45 @@ class EnvLoader(DataLoader):
             )
         
 
-def get_file_dataloader(env, batch_size: int, file_dir: dict = None, num_agents = None):
+def get_file_dataloader(env, batch_size: int, file_dir: Union[dict, str] = None, num_agents = None):
     if file_dir is None:
         return {}
-        
-    dataloader = {
-        file_name: EnvLoader(
+    
+    if isinstance(file_dir, (dict, DictConfig)):
+        dataloader = {
+            file_name: EnvLoader(
+                env=env,
+                path=file_dir, 
+                batch_size=batch_size,
+                read_fn=partial(read_icaps_instances, num_agents=num_agents)
+            )
+            for file_name, file_dir in file_dir.items()
+        }
+    elif isinstance(file_dir, str):
+        dataloader = EnvLoader(
             env=env,
             path=file_dir, 
             batch_size=batch_size,
-            read_fn=partial(read_luttmann, num_agents=num_agents)
+            read_fn=partial(read_icaps_instances, num_agents=num_agents)
         )
-        for file_name, file_dir in file_dir.items()
-    }
+    else:
+        raise ValueError(f"Expected str or dict for param file_dir, got {file_dir}")
     return dataloader
 
 
-def read_luttmann(path, num_agents):
+def read_icaps_instances(path, num_agents):
     td = torch.load(path)
     bs = td.batch_size
     # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)
     if num_agents is None:
-        num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["init_capacity"])
+        num_agents = torch.ceil(td["demand"].sum(-1, keepdim=True) / td["init_capacity"].max())
         max_num_agents = int(num_agents.max().item())
     else:
         max_num_agents = num_agents
     agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*bs, max_num_agents)
     num_agents = max_num_agents
-    current_location = td["current_location"].repeat(1, num_agents)
-    capacity = td["init_capacity"].repeat(1, num_agents)
+    current_location = td["current_location"].view(-1,1).repeat(1, num_agents)
+    capacity = td["init_capacity"].view(-1,1).repeat(1, num_agents)
     capacity[agent_pad_mask] = 0
     td.update({
         "init_capacity": capacity,

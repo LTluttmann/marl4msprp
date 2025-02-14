@@ -1,8 +1,11 @@
 # @package _global_
+defaults:
+  - base@policy
+
 policy:
   policy: ham
   
 env:
-  name: msprp
-  num_agents: 1
+  name: ar
+  num_agents: null
   goal: min-max

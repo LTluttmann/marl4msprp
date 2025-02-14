@@ -10,7 +10,7 @@ from typing import TypedDict, Tuple, List
 
 from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
-from marlprp.models.policy_args import MahamParams
+from marlprp.models.policy_args import MahamParams, ParcoParams
 from marlprp.utils.ops import gather_by_index, batchify
 from marlprp.models.encoder.base import MatNetEncoderOutput
 from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
@@ -21,6 +21,7 @@ from .attn import AttentionPointer
 
 __all__ = [
     "HierarchicalMultiAgentDecoder",
+    "HierarchicalParcoDecoder"
 ]
 
 
@@ -133,7 +134,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         self.pad = params.eval_multistep
         self.dec_strategy = dec_strategy
         self.use_attn_mask = params.decoder_attn_mask
-        self.loss = "listnet"
+        self.ranking_strategy = params.agent_ranking
 
     def forward(
         self, 
@@ -202,7 +203,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
 
     def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
-        if self.loss == "ce":
+        if self.eval_per_agent:
             return self._get_logp_of_action_ce(embeddings, action, mask, state)
         else:
             return self._get_logp_of_action_listnet(embeddings, action, mask, state)
@@ -260,21 +261,54 @@ class BaseMultiAgentDecoder(BaseDecoder):
         
         return selected_logps, dist_entropys
 
-    def _logits_to_logp(self, logits, mask):
+    def _logits_to_logp(self, logits: torch.Tensor, mask: torch.Tensor):
         if torch.is_grad_enabled() and self.eval_per_agent:
-            # when training we evaluate on a per agent basis
-            # perform softmax per agent
+            # when training we either evaluate on a per agent basis by performing softmax per agent
             logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
             # flatten logp for selection
             logp = rearrange(logp, "b a s -> b (s a)")
-
-        else:
-            # when rolling out, we sample iteratively from flattened prob dist
+        elif torch.is_grad_enabled():
+            # or perform softmax normalization over the join action space
             mask = rearrange(mask, "b a s -> b (s a)")
             logits = rearrange(logits, "b a s -> b (s a)")
             logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
+        else:
+            # when rolling out, we sample iteratively from flattened prob dist
+            logits, mask = self._prepare_logits_for_rollout(logits, mask)
+            logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
             
         return logp, mask
+
+    
+    def _prepare_logits_for_rollout(self, logits: torch.Tensor, mask: torch.Tensor):
+        if self.ranking_strategy != "learned":
+            batch_idx = torch.arange(logits.size(0), device=logits.device)
+            new_mask = mask.clone()
+            if self.ranking_strategy == "index":
+                # follow the agent order defined by the set of agents, i.e. m=1,...,M
+                next_agent = (~mask).any(-1).float().argmax(1)
+            elif self.ranking_strategy == "random":
+                # select a random action to perform an action
+                valid_agent = (~mask).any(-1)
+                next_agent = (
+                    torch.rand_like(valid_agent.float())
+                    .masked_fill(~valid_agent, float("-inf"))
+                    .softmax(dim=1)
+                    .multinomial(1)
+                    .squeeze(1)
+                )
+            else:
+                raise ValueError
+            # mask all actions in the new mask
+            new_mask[...] = True  
+            # ...except for the selected agent
+            new_mask[batch_idx, next_agent, :] = mask[batch_idx, next_agent, :]
+            mask = rearrange(new_mask, "b a s -> b (s a)")
+        else:
+            mask = rearrange(mask, "b a s -> b (s a)")
+
+        logits = rearrange(logits, "b a s -> b (s a)")
+        return logits, mask
 
 ################################################################
 #########################  DECODER #############################
@@ -418,15 +452,15 @@ class MultiAgentSkuDecoder(BaseMultiAgentDecoder):
 class BaseParcoDecoder(BaseDecoder):
     key = ...
 
-    def __init__(self, pointer: nn.Module, params: MahamParams, dec_strategy = None) -> None:
+    def __init__(self, pointer: nn.Module, params: ParcoParams, dec_strategy = None) -> None:
         super().__init__(params)
         self.eval_multistep = params.eval_multistep
         self.eval_per_agent = params.eval_per_agent
         self.pad = params.eval_multistep
         self.dec_strategy = dec_strategy
         self.use_attn_mask = params.decoder_attn_mask
-        self.loss = "ce"
         self.pointer = pointer
+        self.ranking_strategy = params.agent_ranking
 
     def forward(
         self, 
@@ -487,6 +521,15 @@ class BaseParcoDecoder(BaseDecoder):
 
         return selected_logp, dist_entropys
 
+    def _get_agent_order(self, logp: torch.Tensor, state: MSPRPState):
+        if self.ranking_strategy == "logp":
+            masked_priorities = logp.masked_fill(state.agent_pad_mask, float("-inf"))
+        elif self.ranking_strategy == "random":
+            masked_priorities = torch.rand_like(logp).masked_fill(state.agent_pad_mask, float("-inf"))
+        elif self.ranking_strategy == "index":
+            masked_priorities = torch.arange(state.num_agents, device=state.device).flip(dims=(0,)).view(1, -1).repeat(logp.size(0), 1)
+        precedence = torch.argsort(masked_priorities, dim=1, descending=True)
+        return precedence
 
 class ParcoShelfDecoder(BaseParcoDecoder):
 
@@ -500,7 +543,7 @@ class ParcoShelfDecoder(BaseParcoDecoder):
         bs, num_agents = action_idx.shape
         agent_idx = torch.arange(num_agents, device=state.device, dtype=torch.long).view(1,-1).repeat(bs, 1)
 
-        precedence = torch.argsort(logp, dim=1, descending=True)
+        precedence = self._get_agent_order(logp, state)
         action_sorted = gather_by_index(action_idx.clone(), precedence)
         actions = action_sorted.split(1, dim=-1)
 
@@ -538,8 +581,7 @@ class ParcoSkuDecoder(BaseParcoDecoder):
     def _translate_action(self, action_idx: torch.Tensor, logp: torch.Tensor, state: MSPRPState, env):
         bs, num_agents = action_idx.shape
         agent_idx = torch.arange(num_agents, device=state.device, dtype=torch.long).view(1,-1).repeat(bs, 1)
-
-        precedence = torch.argsort(logp.masked_fill(state.agent_pad_mask, float("-inf")), dim=1, descending=True)
+        precedence = self._get_agent_order(logp, state)
         action_sorted = gather_by_index(action_idx.clone(), precedence)
         actions = action_sorted.split(1, dim=-1)
 
@@ -596,9 +638,5 @@ class HierarchicalParcoDecoder(HierarchicalMultiAgentDecoder):
         self.dec_strategy.actions = {k: flatten_list(v) for k,v in self.dec_strategy.actions.items()}
 
         logps, actions, state = self.dec_strategy.post_decoder_hook(state, env)
-        # logps = rearrange(logps, "(b a) s -> b (s a)", a=state.num_agents)
-        # actions = TensorDict(
-        #     {k: rearrange(v, "(b a) s -> b (s a)", a=state.num_agents) for k,v in actions.items()}, 
-        #     batch_size=[logps.size(0)], device=state.device
-        # )
+
         return logps, actions, state

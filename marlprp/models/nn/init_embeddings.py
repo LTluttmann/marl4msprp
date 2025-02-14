@@ -4,7 +4,7 @@ import torch.nn as nn
 from marlprp.utils.ops import min_max_scale
 from marlprp.env.instance import MSPRPState
 from marlprp.models.nn.misc import PositionalEncoding
-from marlprp.models.policy_args import PolicyParams, TransformerParams
+from marlprp.models.policy_args import PolicyParams, TransformerParams, MahamParams
 
 
 def get_init_emb_layer(params: PolicyParams):
@@ -26,21 +26,20 @@ class MultiAgentInitEmbedding(nn.Module):
         super(MultiAgentInitEmbedding, self).__init__()
         self.embed_dim = policy_params.embed_dim
         self.scale_supply_by_demand = policy_params.scale_supply_by_demand
-        self.depot_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
+        self.depot_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
         self.shelf_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
         self.sku_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
 
     def _init_depot_embed(self, state: MSPRPState):
         depot_coordinates = state.coordinates[:, :state.num_depots]
-        depot_load = state.packing_items
+        # depot_load = state.packing_items
         feats = torch.stack([
             depot_coordinates[..., 0],
             depot_coordinates[..., 1],
-            min_max_scale(depot_load, dim=1)
+            # min_max_scale(depot_load, dim=1)
         ], dim=-1)
         return self.depot_proj(feats)
     
-
     def _init_shelf_embed(self, state: MSPRPState):
         num_skus = state.num_skus
         shelf_coordinates = state.coordinates[:, state.num_depots:]
@@ -62,7 +61,7 @@ class MultiAgentInitEmbedding(nn.Module):
             demand_scaled,
             num_storage_loc / state.num_shelves
         ], dim=-1)
-
+    
         return self.sku_proj(feats)
     
     def _init_edge_embed(self, state: MSPRPState):
@@ -73,7 +72,7 @@ class MultiAgentInitEmbedding(nn.Module):
                 torch.clamp(state.supply_w_depot.clone() / state.demand[:, None], max=1) # supply more than 100% of demand is irrelevant
             )
         else:
-            supply_scaled = state.supply_w_depot.clone() / state.capacity[..., None]
+            supply_scaled = state.supply_w_depot.clone() / state.capacity
         return supply_scaled
     
     def forward(self, tc: MSPRPState):
@@ -84,6 +83,7 @@ class MultiAgentInitEmbedding(nn.Module):
 
         node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
         return node_emb, sku_emb, edge_emb
+
 
 
 class EquityTransformerInitEmbedding(MultiAgentInitEmbedding):

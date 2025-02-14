@@ -1,8 +1,19 @@
 # @package _global_
+defaults:
+  - base@policy
+
+  
 policy:
   policy: maham
-
+  use_ranking_pe: True
+  param_sharing: True
+  decoder_attn_mask: True
+  mask_no_edge: False
 env:
   name: msprp
   num_agents: null
   goal: min-max
+
+model:
+  eval_per_agent: True
+  eval_multistep: True

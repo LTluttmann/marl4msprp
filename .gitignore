@@ -5,8 +5,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+dataset.pth
+greedy.pth
+solution*.pth
 logs/*
 
+*/lightning_logs/*
+checkpoints/*
+checkpoints_new/*
 *.png
 # C extensions
 *.so

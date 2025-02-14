@@ -112,7 +112,7 @@ class SingleAgentPolicy(RoutingPolicy):
     def __init__(self, model_params: PolicyParams):
         super().__init__(model_params)  
         self.encoder = MatNetEncoder(model_params)
-        self.decoder = HierarchicalMultiAgentDecoder(model_params)
+        self.decoder = HierarchicalSingleAgentDecoder(model_params)
         self.critic = None
 
 

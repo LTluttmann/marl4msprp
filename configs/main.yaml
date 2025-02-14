@@ -7,7 +7,7 @@ defaults:
   - paths: default.yaml
   - env: 10s-3i-20p
   - model: sl
-  - policy: null
+  - policy: maham
   - env_list: null
 
 run_name: ${env.id}
@@ -27,7 +27,7 @@ train:
     weight_decay: 1e-6
   lr_reduce_on_plateau_patience: 3
   max_grad_norm: 1.5
-  epochs: 40
+  epochs: 50
   devices: "auto"
   accelerator: "auto"
 
@@ -37,9 +37,10 @@ val:
   decode_type: greedy
 
 test:
-  dataset_size: 1000
-  batch_size: 50
-  num_decoding_samples: 200 
+  dataset_size: 0
+  batch_size: 10
+  num_decoding_samples: 1280 
   decode_type: sampling
   gurobi_timeout: 3600
-  data_dir: ${paths.test_data_dir}/luttmann
+  data_dir: ${paths.test_data_dir}/icaps
+  data_file: ${test.data_dir}/${env.id}/td_data.pth

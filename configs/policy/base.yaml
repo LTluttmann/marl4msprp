@@ -1,0 +1,14 @@
+embed_dim: 256
+num_encoder_layers: 4
+num_heads: 8
+feed_forward_hidden: 512
+input_dropout: 0.0
+activation: "gelu"
+norm_first: false
+scale_supply_by_demand: false
+bias: false
+mask_no_edge: true
+use_rezero: false
+param_sharing: true
+decoder_attn_mask: false
+ms_split_heads: true

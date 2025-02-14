@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 from tensordict import TensorDict
 from torch.nn.modules import TransformerEncoderLayer
@@ -8,7 +9,7 @@ from marlprp.models.policy_args import TransformerParams
 from marlprp.models.nn.init_embeddings import get_init_emb_layer
 
 from .base import BaseEncoder, MatNetEncoderOutput
-from .mixed_attention import EfficientMixedScoreMultiHeadAttention
+from .mixed_attention import EfficientMixedScoreMultiHeadAttentionLayer, MixedScoreMultiHeadAttentionLayer
 
 
 class MatNetEncoderLayer(nn.Module):
@@ -38,7 +39,10 @@ class MatNetEncoderLayer(nn.Module):
             batch_first=True,
         )
 
-        self.cross_attn = EfficientMixedScoreMultiHeadAttention(params)
+        if params.param_sharing:
+            self.cross_attn = EfficientMixedScoreMultiHeadAttentionLayer(params)
+        else:
+            self.cross_attn = MixedScoreMultiHeadAttentionLayer(params)
 
         self.shelf_norm = LayerNorm(params.embed_dim)
         self.sku_norm = LayerNorm(params.embed_dim)
@@ -118,9 +122,17 @@ class MatNetEncoder(BaseEncoder):
 
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
-            cross_mask = edge_feat.gt(0)
+            cross_mask = edge_feat.eq(0)
+            sku_mask = state.demand.eq(0).unsqueeze(1).repeat(1, state.num_skus, 1)
+            sku_mask = sku_mask.diagonal_scatter(
+                torch.full_like(state.demand, fill_value=False),
+                dim1=1, dim2=2
+            )
+            sku_mask = sku_mask.repeat_interleave(self.num_heads, dim=0)
         else:
             cross_mask = None
+            sku_mask = None
+        
 
         # run through the layers 
         for layer in self.encoder:
@@ -129,6 +141,7 @@ class MatNetEncoder(BaseEncoder):
                 sku_emb, 
                 cost_mat=edge_feat, 
                 cross_mask=cross_mask,
+                sku_mask=sku_mask
             )
         
         return TensorDict(
@@ -167,7 +180,7 @@ class ETEncoder(BaseEncoder):
 
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
-            cross_mask = edge_feat.gt(0)
+            cross_mask = edge_feat.eq(0)
         else:
             cross_mask = None
 

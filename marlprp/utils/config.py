@@ -49,10 +49,7 @@ class BaseEnvParams:
 
     is_multi_instance: bool = False
     
-    packing_ratio_penalty: float = 0.1
-    zero_picks_penalty: float = 0.05
-
-    always_mask_depot: bool = False
+    packing_ratio_penalty: float = 0.0
 
     goal: str = None
 
@@ -77,13 +74,13 @@ class BaseEnvParams:
         env_config_registry[cls.name] = cls
 
     @classmethod
-    def initialize(cls, env: str = None, **kwargs):
+    def initialize(cls, name: str = None, env: str = None, **kwargs):
         try:
-            env = env or cls.name
-            Config = env_config_registry[env]
+            env_name = name or cls.name
+            Config = env_config_registry[env_name]
             return Config(**kwargs)
         except KeyError:
-            raise ValueError(f"No Config found for environment {env}.")
+            raise ValueError(f"No Config found for environment {env_name}.")
         
 
 @dataclass(kw_only=True)
@@ -112,15 +109,13 @@ class SAEnvParams(EnvParams):
     name: str = "sa"
 
 
-
+@dataclass
 class EnvParamList:
     
-    def __init__(self, param_list: List[EnvParams] = []):
-        self.envs = param_list
-        self.name = "msprp"
-        self.id = "multi_instance"
-        self.always_mask_depot: bool = False
-        self.is_multiinstance: bool = True    
+    envs: List[EnvParams] 
+    name: str = "msprp"
+    id: str = "multi_instance"
+    is_multiinstance: bool = True    
 
     def append(self, item):
         self.envs.append(item)
@@ -143,7 +138,7 @@ class EnvParamList:
         for params in env_params.values():
             params = EnvParams.initialize(**params)
             param_list.append(params)
-        return cfg(param_list)
+        return cfg(envs=param_list)
     
 
     def __len__(self):
@@ -176,7 +171,6 @@ class PolicyParams:
     _use_critic: bool = False
     _stepwise_encoding: bool = False
     is_multiagent_policy: bool = True
-    max_steps: int = None
 
     def __init_subclass__(cls, *args, **kw):
         super().__init_subclass__(*args, **kw)
@@ -221,10 +215,6 @@ class ModelParams:
 
     # model architecture
     algorithm: str = None
-
-    train_decode_type: str = "sampling"
-    val_decode_type: str = "greedy"
-    test_decode_type: str = "greedy"
     stepwise_encoding: bool = False
     ref: str = None
     warmup_params: "ModelParams" = None
@@ -371,6 +361,7 @@ class TestParams:
     num_decoding_samples: int = 100
 
     data_dir: str = None
+    data_file: str = None
     checkpoint: str = None
     seed: int = 1234567
 

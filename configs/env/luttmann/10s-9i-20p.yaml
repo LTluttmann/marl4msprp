@@ -1,9 +1,0 @@
-# @package _global_
-defaults:
-  - luttmann/base_env
-
-env:
-  num_shelves: 10
-  num_skus: 9
-  num_storage_locations: 20
-  capacity: 9
