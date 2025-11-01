@@ -93,7 +93,7 @@ class MatNetEncoderLayer(nn.Module):
         shelf_emb_out = self.shelf_mha(shelf_emb_out, src_mask=shelf_mask)
 
         # (bs, num_ma, emb)
-        sku_emb_out = self.sku_mha(sku_emb_out, src_mask=sku_mask)
+        # sku_emb_out = self.sku_mha(sku_emb_out, src_mask=sku_mask)
 
 
         ###### FINAL NORMS AND REARRANGE ##########

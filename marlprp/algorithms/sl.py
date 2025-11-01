@@ -44,6 +44,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         if self.model_params.lookback_intervals:
             self.old_tgt_policy_state = copy.deepcopy(self.policy.state_dict())
 
+        self.penalty_coef = model_params.penalty_coef
         self.num_starts = self.setup_parameter(model_params.num_starts, dtype=int)
         self.entropy_coef = self.setup_parameter(model_params.entropy_coef)
         self.lookback_intervals = self.setup_parameter(
@@ -154,9 +155,11 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             # store rollout results
             train_rewards.append(rewards.mean(1))
             reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
-            avg_steps.append((~state_stack["mask"]).sum(1).float().mean())
-            # (bs)
-            best_rew, best_idx = rewards.max(dim=1)
+            steps_till_done = (~states_unbs["mask"]).sum(-1).float()
+            avg_steps.append(steps_till_done.mean())
+            # (bs); add very small noise to randomize tie breaks
+            best_idx = torch.argmax(rewards - self.penalty_coef * steps_till_done + torch.rand_like(rewards) * 1e-9, dim=1)
+            # best_rew, best_idx = rewards.max(dim=1)
             # (bs)
             best_states = states_unbs.gather(
                 1, best_idx[:, None, None].expand(-1, 1, steps)

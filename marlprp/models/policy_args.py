@@ -16,15 +16,22 @@ class TransformerParams(PolicyParams):
     ms_hidden_dim: int = None
     mask_no_edge: bool = True
     decoder_attn_mask: bool = False
-    ms_split_heads: bool = False
     use_rezero: bool = False
     param_sharing: bool = True
+    cost_mat_dims: int = 1
+    chunk_ms_scores_batch: int = 0
+    ms_scores_softmax_temp: float = 1.0
+    ms_scores_tanh_clip: float = 0.0
+    ms_sparse_attn: bool = False
+
     def __post_init__(self):
         super().__post_init__()
         self.feed_forward_hidden = self.feed_forward_hidden or 2*self.embed_dim
         self.qkv_dim = self.embed_dim // self.num_heads
         assert self.embed_dim % self.num_heads == 0, "self.kdim must be divisible by num_heads"
         self.ms_hidden_dim = self.ms_hidden_dim or self.qkv_dim
+        if self.ms_sparse_attn and self.param_sharing:
+            raise NotImplementedError("sparse attention with parameter sharing not implemented yet")
 
 
 @dataclass(kw_only=True)

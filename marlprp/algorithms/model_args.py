@@ -32,7 +32,8 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
     lookback_intervals: int = None
     always_clear_buffer: bool = False
     update_after_every_batch: bool = False
-
+    penalty_coef: float = 0.005
+    
     def __post_init__(self):
         super().__post_init__()
 

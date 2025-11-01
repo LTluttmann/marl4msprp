@@ -37,6 +37,7 @@ class MultiAgentEnv:
         # all demanded items in one go (i.e. one tour per picker / agent)
         self.is_multitour_instance = self.params.num_agents is not None
         self.generators = sorted(self.generators, key=lambda x: x.size)
+        self.use_stay_token = self.params.use_stay_token
 
     @classmethod
     def initialize(cls, params: EnvParams):
@@ -177,7 +178,6 @@ class MultiAgentEnv:
         no_more_demand = state.demand.eq(0).all(1)
 
         if not self.is_multitour_instance:
-            # Here we unmask the depot for the agent with the longest tour, if the capacity of the others is sufficient
             # (bs, num_agents, num_agents)
             remaining_capacity_expanded = state.remaining_capacity.unsqueeze(1).repeat(1, state.num_agents, 1)
             mask = torch.eye(state.num_agents, device=state.device).bool().unsqueeze(0).expand_as(remaining_capacity_expanded)
@@ -188,36 +188,25 @@ class MultiAgentEnv:
             # (bs, num_agents ,num_depots)
             mask_depot = mask_depot & ~mask_loc_per_agent.all(-1)  # NOTE necessary for parco
             mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
-            # NOTE below code unmasks depot only for agent with longest tour. Howeverm enforcing this could 
-            # possibly mask the optimal solution (e.g. if agent with 2. longest tour has a long way to depot)
-            # Best way is to let the policy learn this and simply unmask all agents depot actions 
-            # -----------------------------------------------------------------------------------------
-            # unmask_depot = capacity_of_other_agents.ge(remaining_demand) & remaining_demand.gt(0)
-            # # (bs, num_agents ,num_depots)
-            # aug_tour_length = state.tour_length.clone()
-            # aug_tour_length += torch.arange(state.num_agents, device=state.device).view(1, -1).repeat(state.size(0), 1) * 1e-6
-            # is_longest_tour = aug_tour_length == aug_tour_length.max(1,keepdim=True).values
-            # unmask_depot = unmask_depot & is_longest_tour
-            # mask_depot = ~(unmask_depot | mask_loc_per_agent.all(-1))
-            # mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
+            # NOTE, if state is not done yet, we do not have to enable done agents to stay at their current position, as there are still agents that can "move"
+            finished_agents = has_no_capacity & state.agent_at_depot()
+            mask_depot[finished_agents] = True
         else:
             # We should avoid traveling to the depot back-to-back, except instance is done
             # (bs, num_agents)
             mask_depot = state.agent_at_depot() & ~no_more_demand[:, None]
             # (bs, num_agents, num_depots)
             mask_depot = mask_depot[..., None].repeat(1, 1, state.num_depots)
-            
-        # for finished (i.e. no demand and back at depot) instances, mask all but current node
-        finished = state.agent_at_depot() & no_more_demand[:, None]
-        mask_depot[finished] = ~(state.current_loc_ohe[...,:state.num_depots][finished].bool())
+            # # for finished (i.e. no demand and back at depot) instances, mask all but current node in update_mask
+            # finished_agents = (~state.done.unsqueeze(1)) & state.agent_at_depot() & no_more_demand[:, None]
+            # mask_depot[finished_agents] = True # ~(state.current_loc_ohe[...,:state.num_depots][finished].bool())
+        # if state is done, keep every agent at its current position
+        mask_depot[state.done] = ~(state.current_loc_ohe[...,:state.num_depots][state.done].bool())
         # (bs, num_agents, num_nodes)
         agent_node_mask = torch.cat((mask_depot, mask_loc_per_agent), 2).bool()
+        # NOTE only need this in update_mask! 
         # padded agents just stay where they are
-        agent_node_mask[state.agent_pad_mask] = ~(state.current_loc_ohe[state.agent_pad_mask].bool())
-        # if True:
-        #     curr_shelf_has_supply = ~gather_by_index(agent_node_mask, state.current_location, 2)
-        #     keep_agent_at_shelf = curr_shelf_has_supply & state.current_location != 0
-        #     agent_node_mask[keep_agent_at_shelf] = ~(state.current_loc_ohe[keep_agent_at_shelf].bool())
+        # agent_node_mask[state.agent_pad_mask] = ~(state.current_loc_ohe[state.agent_pad_mask].bool())
         return agent_node_mask
 
 
@@ -302,7 +291,7 @@ class MultiAgentEnv:
         logp = F.log_softmax(state.packing_items, dim=-1)
         entropy = -(logp.exp() * logp).sum(1)
 
-        reward = -distance #  + self.params.packing_ratio_penalty * entropy
+        reward = -distance + self.params.packing_ratio_penalty * entropy
 
         return reward
 

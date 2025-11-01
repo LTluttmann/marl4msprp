@@ -4,7 +4,6 @@ from torch import nn
 from torch import Tensor
 from einops import rearrange
 import torch.nn.functional as F
-from torch.nn.modules.normalization import LayerNorm
 
 from marlprp.models.nn.misc import MLP
 from marlprp.env.instance import MSPRPState
@@ -40,16 +39,15 @@ class AttentionPointerMechanism(nn.Module):
         super(AttentionPointerMechanism, self).__init__()
         self.num_heads = params.num_heads
         # Projection - query, key, value already include projections
-        self.project_out = nn.Linear(
-            params.embed_dim, params.embed_dim, bias=False
-        )
+        self.project_out = nn.Linear(params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_rezero:
             self.resweight = nn.Parameter(torch.tensor(0.))
         else:
-            self.norm = LayerNorm(params.embed_dim)
+            self.norm = nn.LayerNorm(params.embed_dim)
             self.resweight = 1
         self.dropout = nn.Dropout(params.dropout)
         self.check_nan = check_nan
+
 
     def forward(self, query, key, value, logit_key, attn_mask=None):
         """Compute attention logits given query, key, value, logit key and attention mask.

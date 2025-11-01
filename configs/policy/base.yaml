@@ -11,4 +11,4 @@ mask_no_edge: true
 use_rezero: false
 param_sharing: true
 decoder_attn_mask: false
-ms_split_heads: true
+chunk_ms_scores_batch: 1

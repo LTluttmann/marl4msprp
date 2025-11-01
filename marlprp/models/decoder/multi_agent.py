@@ -355,7 +355,8 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             selected_shelf.view(bs, 1, 1).expand(-1, num_agents, 1), 
             True
         )[..., state.num_depots:]
-
+        # calculate the remaining demand; (bs, 1)
+        remaining_demand = state.demand.sum(-1, keepdim=True)
         if not env.is_multitour_instance:
             # in case of "one tour per agent" instanes (i.e. num_agents=None), an agent may only return to the depot if
             # all other active agents have enough capacity to pick all remaining items. If one agent returns to the depot,
@@ -370,16 +371,29 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             mask = torch.eye(state.num_agents, device=state.device).bool().unsqueeze(0).expand_as(remaining_capacity_expanded)
             # (bs, num_agents)
             capacity_of_other_agents = remaining_capacity_expanded.masked_fill(mask, 0).sum(-1)
-            remaining_demand = state.demand.sum(-1, keepdim=True)
+            # mask depot for all agents if their combined capacity is insufficient to cover remaining demand
             mask_depot = capacity_of_other_agents.lt(remaining_demand) & remaining_demand.gt(0)
             # (bs, num_agents ,num_depots)
             mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
             updated_mask[..., :state.num_depots] = mask_depot
+
+        if env.use_stay_token:
+
+            active_agents = ~state.agent_at_depot().unsqueeze(1).expand(bs, num_agents, num_agents)
+            mask = ~torch.eye(num_agents, dtype=torch.bool, device=state.device)
+            # Apply mask to exclude the diagonal; (bs, num_agents)
+            other_active_agents = active_agents[:, mask].view(bs, num_agents, num_agents - 1).any(dim=2)
+            #
+            rem_demand_and_other_active_agents = remaining_demand.gt(0) & other_active_agents
+            # if we enable the stay_token, idle agents can always select to stay at their current location if there is remaining demand
+            updated_mask.scatter_(-1, state.current_location.view(bs, num_agents, 1), ~rem_demand_and_other_active_agents[...,None])
+
         # We have to make sure all idle agents can select some action. Therefore, we first need to determine 
         # which idle agents have no feasible action left (since all their feasible nodes were selected already)...
         no_action_left = updated_mask.all(-1)
         # and then we let these agents wait at their current location
         updated_mask[no_action_left] = ~state.current_loc_ohe[no_action_left].bool()
+
         # all actions of busy agents are masked
         updated_mask = updated_mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_nodes), True)
 

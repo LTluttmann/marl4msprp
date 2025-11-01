@@ -88,7 +88,8 @@ class EnvParams(BaseEnvParams):
     name: str = "msprp"
     num_skus: Union[List, int] = 3
     size: int = field(init=False)
-
+    use_stay_token: bool = False
+    
     def __post_init__(self):
         super().__post_init__()
         self.num_storage_locations = infer_num_storage_locations(
