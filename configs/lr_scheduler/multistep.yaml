@@ -1,0 +1,8 @@
+scheduler_name:
+  "MultiStepLR"
+scheduler_kwargs:
+  milestones: [100]
+  gamma: 0.5
+warmup:
+  start_value: 1e-8
+  duration: 3

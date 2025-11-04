@@ -146,6 +146,7 @@ class RunManager():
         self.is_multirun = hc.mode.name == "MULTIRUN"
         self.locked_device = None
         self.assert_idle = getattr(cfg, "assert_idle", True)
+        self.start_time = None
 
     @rank_zero_only
     def _enter(self):
@@ -158,6 +159,7 @@ class RunManager():
         accelerator = "gpu" if torch.cuda.is_available() else "cpu"  # TODO support MPS?
         self.cfg.train.devices = device
         self.cfg.train.accelerator = accelerator
+        self.start_time = time.time()
 
     @rank_zero_only
     def _exit(self):
@@ -174,7 +176,7 @@ class RunManager():
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Called after a job ends."""
-        logger.info("Finishing Job...")
+        logger.info("Finishing Job after %.2f minutes.", (time.time() - self.start_time)/60)
         self._exit()
 
 

@@ -1,37 +1,42 @@
 import os
+import gc
 import math
 import copy
+import time
+import wandb
+import torch
 import numpy as np
-from omegaconf import ListConfig
+
+
 from collections import defaultdict
 from rich.logging import RichHandler
-from typing import Dict, Type, Any, Union
-
-import torch
-import torch.nn as nn
-from torch.optim import Adam
-import torch.distributed as dist
+from tensordict import TensorDict
+from torch.optim import Adam, AdamW
 from lightning import LightningModule
+from typing import Dict, Type, Any, Union
+from omegaconf import ListConfig, DictConfig
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from rl4co.utils.optim_helpers import create_scheduler
-from torchrl.data.replay_buffers import ReplayBufferEnsemble
+from lightning.pytorch.loggers.wandb import WandbLogger
+from torchrl.data import LazyTensorStorage, ReplayBufferEnsemble, TensorDictReplayBuffer
 
 from marlprp.env.env import MultiAgentEnv
 from marlprp.models.policies import RoutingPolicy
-from marlprp.utils.utils import monitor_lr_changes
+from marlprp.utils.scheduler import create_scheduler
 from marlprp.utils.logger import get_lightning_logger
-from marlprp.utils.data import environment_distribution
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
 from marlprp.utils.ops import all_gather_w_padding, all_gather_numeric
 from marlprp.algorithms.utils import NumericParameter, make_replay_buffer
 from marlprp.algorithms.model_args import ModelParams, ModelWithReplayBufferParams
 from marlprp.utils.config import (
     EnvParams,
+    PolicyParams,
     TrainingParams, 
     ValidationParams, 
     TestParams, 
-    save_config_to_dict
+    config_to_dict
 )
+from marlprp.algorithms.losses import ce_loss
+from .utils import GradNormAccumulator, generate_env_curriculum, get_grad_norm
 
 
 model_registry: Dict[str, Type['LearningAlgorithm']] = {}
@@ -57,64 +62,77 @@ class LearningAlgorithm(LightningModule):
         env: MultiAgentEnv,
         policy: RoutingPolicy,
         model_params: ModelParams,
-        train_params: TrainingParams,
-        val_params: ValidationParams,
-        test_params: TestParams
+        train_params: TrainingParams = None,
+        val_params: ValidationParams = None,
+        test_params: TestParams = None,
     ) -> None:
         
         super(LearningAlgorithm, self).__init__()
+        # set env and policy
+        self.env = env
+        self.policy = policy
 
         self.pylogger = logger
-        # self.save_hyperparameters("model_params")
+        # self.save_hyperparameters(asdict(model_params))
         self.model_params = model_params
         self.train_params = train_params
         self.val_params = val_params
         self.test_params = test_params
 
-        # specifically define batch size to be altered by batch size finder
-        self.param_container: Dict[NumericParameter] = {}
-        self.train_batch_size = self.setup_parameter(train_params.batch_size, dtype=int)
-
-        self.env = env
-        self.policy = policy
-
+        self.param_container: Dict[str, NumericParameter] = {}
         self.instance_ids = [g.id for g in self.env.generators]
-        self.monitor_instance = train_params.monitor_instance or self.instance_ids[0]
-        self.validation_step_rewards = defaultdict(list) # {g.id: [] for g in self.env.generators}
+        # init best rewards achieved so far
+        self.best_rewards = {instance: float("-inf") for instance in self.instance_ids}
+        self.best_avg_reward = float("-inf")
+        self.test_set_names = None
 
+        if train_params is not None:
+            self.training_mode = True
+            self._init_for_training()
+        else:
+            self.training_mode = False
+
+    def _init_for_training(self):
+        # specifically define batch size to be altered by batch size finder
+        self.train_batch_size = self.setup_parameter(self.train_params.batch_size, dtype=int)
+        self.monitor_instance = self.train_params.monitor_instance or self.instance_ids[0]
+        self.validation_step_rewards = defaultdict(list)
         self.val_set_names = ["synthetic"]
-        self.test_set_names = ["synthetic"]
+        # decide whether or not to use gradient normalizer when accumulating batches of different instance types
+        if (
+            len(self.instance_ids) > 1 
+            and self.train_params.accumulate_grad_batches > 1 
+            and self.train_params.norm_curriculum_grad
+        ):
+            self.grad_accumulator = GradNormAccumulator(self.policy)
 
-
+        
     def __init_subclass__(cls, *args, **kw):
         super().__init_subclass__(*args, **kw)
         model_registry[cls.name] = cls
 
     def _get_optimizer(self):
-        optimizer_kwargs = save_config_to_dict(self.train_params.optimizer_kwargs)
-        learning_rate = optimizer_kwargs.pop("policy_lr")
-        optimizer_kwargs = {
-            "lr": learning_rate,
-            **optimizer_kwargs
-        }
+        optimizer_kwargs = config_to_dict(self.train_params.optimizer_kwargs)
+        use_adamw = optimizer_kwargs.pop("use_adamw", False)
+        # rename learning rate key
+        optimizer_kwargs["lr"] = optimizer_kwargs.pop("policy_lr")
         policy_params = self.policy.parameters()
-        optimizer = Adam(policy_params, **optimizer_kwargs)
+        if use_adamw:
+            optimizer = AdamW(policy_params, **optimizer_kwargs)
+        else:    
+            optimizer = Adam(policy_params, **optimizer_kwargs)
+        
         return optimizer
 
     @property
     def world_size(self):
         return self.trainer.world_size
-    
-    @property
-    def test_data_dirs(self):
-        dir_fn = lambda instance: os.path.join(self.test_params.data_dir, instance, "td_data.pth")
-        return {f"icaps/{g.id}": dir_fn(g.id) for g in self.env.generators}
 
     @classmethod
     def initialize(
         cls,
         env: MultiAgentEnv,
-        policy: nn.Module,
+        policy: RoutingPolicy,
         model_params: ModelParams,
         train_params: TrainingParams,
         val_params: ValidationParams,
@@ -133,28 +151,51 @@ class LearningAlgorithm(LightningModule):
     @classmethod
     def init_from_checkpoint(
         cls, 
+        checkpoint_path: str,
         env_params: EnvParams,
-        train_params: TrainingParams, 
-        val_params: ValidationParams, 
-        test_params: TestParams,
         model_params: ModelParams = None,
-    ):
-        assert train_params.checkpoint is not None
-        ckpt = torch.load(train_params.checkpoint)
-        model_params_ckpt: ModelParams = ckpt["hyper_parameters"]["model_params"]
+        train_params: TrainingParams = None, 
+        val_params: ValidationParams = None, 
+        test_params: TestParams = None,
+    ) -> tuple["LearningAlgorithm", ModelParams]:
+        ckpt = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=False)
+        # get old parameters
+        try:
+            model_params_ckpt: ModelParams = ckpt["hyper_parameters"]["model_params"]
+        except KeyError:
+
+            def load_config(config_path: str, config_name: str, overrides=None):
+                from hydra.core.global_hydra import GlobalHydra
+                from hydra import initialize_config_dir, compose
+                # Clear Hydra singleton so we can re-initialize
+                if GlobalHydra.instance().is_initialized():
+                    GlobalHydra.instance().clear()
+
+                config_path = os.path.join(os.environ["PROJECT_ROOT"], config_path)
+
+                with initialize_config_dir(config_path): 
+                    cfg = compose(config_name=config_name)
+                return cfg
+            
+            path_to_config = os.path.join(os.path.split(os.path.split(checkpoint_path)[0])[0], ".hydra")
+            # with open(path_to_config, "r") as f: config = yaml.safe_load(f)
+            cfg = load_config(config_path=path_to_config, config_name="config.yaml")
+            policy_params = PolicyParams.initialize(env=env_params, **cfg["policy"])
+            model_params_ckpt = ModelParams.initialize(policy_params, **cfg["model"])
+
         if model_params is None:
             model_params = model_params_ckpt
         else:
             assert model_params.policy.policy == model_params_ckpt.policy.policy, \
             "Policy of checkpoint and the one specified in new model parameters diverge."
 
-        env = MultiAgentEnv.initialize(params=env_params, multiagent=model_params.policy.is_multiagent_policy)
+        env = MultiAgentEnv.initialize(params=env_params)
         policy = RoutingPolicy.initialize(params=model_params.policy)
 
-        Algorithm = model_registry[model_params.algorithm]
+        cls = model_registry[model_params.algorithm]
 
-        model = Algorithm.load_from_checkpoint(
-            train_params.checkpoint,
+        model = cls.load_from_checkpoint(
+            checkpoint_path,
             map_location=torch.device("cpu"),
             env=env,
             policy=policy,
@@ -163,27 +204,24 @@ class LearningAlgorithm(LightningModule):
             val_params=val_params,
             test_params=test_params,
         )
-        
+
         return model, model_params
 
     def training_step(self, batch: Any, batch_idx: int):
         raise NotImplementedError()
 
     # PyTorch Lightning's built-in validation_step method
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+    def validation_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
         batch, instance_id = batch
         state = self.env.reset(batch)
-        reward = self.policy(state, self.env)["reward"]
+        _, reward = self.policy.generate(state, self.env)
         val_set_name = self.val_set_names[dataloader_idx]
 
         if val_set_name == "synthetic":
             self.validation_step_rewards[instance_id].append(reward)
-            if instance_id == self.monitor_instance:
-                metric_name = f"val/reward"
-            else:
-                metric_name = f"val/reward/{instance_id}"
+            metric_name = f"val/synthetic/{instance_id}/reward"
         else:
-            metric_name = f"val/{val_set_name}/reward"
+            metric_name = f"val/files/{val_set_name}/reward"
 
         self.log(
             metric_name, 
@@ -196,11 +234,17 @@ class LearningAlgorithm(LightningModule):
         )
     
     # PyTorch Lightning's built-in test_step method
-    def test_step(self, batch, batch_idx, dataloader_idx=0):
+    def test_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
+        test_set_name = self.test_set_names[dataloader_idx]
+        if batch_idx == 0:
+            self.pylogger.info(f"Start testing on set {test_set_name}")
+
         batch, _ = batch
         state = self.env.reset(batch)
-        test_reward = self.policy(state, self.env)["reward"]
-        test_set_name = self.test_set_names[dataloader_idx]
+        # recoding time for logging
+        start_time = time.time()
+        _, test_reward = self.policy(state, self.env)
+        step_duration = time.time() - start_time
         self.log(
             f"test/{test_set_name}/reward", 
             test_reward.mean(), 
@@ -210,15 +254,32 @@ class LearningAlgorithm(LightningModule):
             sync_dist=True,
             add_dataloader_idx=False,
         )
+        if batch.size(0) == 1:
+            self.log(
+                f"duration/{test_set_name}",
+                step_duration, 
+                on_step=False, 
+                on_epoch=True, 
+                sync_dist=True,
+                add_dataloader_idx=False,
+            )
 
     # PyTorch Lightning's built-in configure_optimizers method
     def configure_optimizers(self):
         optimizer = self._get_optimizer()
-        lr_scheduler = create_scheduler(
-            optimizer, 
-            self.train_params.lr_scheduler,
-            **self.train_params.lr_scheduler_kwargs    
-        )
+        return_dict = {"optimizer": optimizer}
+
+        if self.train_params.lr_scheduler is not None:
+            lr_scheduler = create_scheduler(
+                optimizer, 
+                **self.train_params.lr_scheduler,  
+            )
+            return_dict["lr_scheduler"] = {
+                "scheduler": lr_scheduler,
+                "frequency": self.train_params.lr_scheduler_interval,
+                "monitor": self.train_params.lr_scheduler_monitor,
+            }
+
         if self.train_params.lr_reduce_on_plateau_patience:
             self.reduce_on_plateau = ReduceLROnPlateau(
                 optimizer=optimizer,
@@ -227,14 +288,7 @@ class LearningAlgorithm(LightningModule):
                 patience=self.train_params.lr_reduce_on_plateau_patience
             )
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": lr_scheduler,
-                "frequency": self.train_params.lr_scheduler_interval,
-                "monitor": self.train_params.lr_scheduler_monitor,
-            }
-        }
+        return return_dict
     
     def __setattr__(self, name, value):
         """Intercept attribute setting to hook parameter setup."""
@@ -246,14 +300,18 @@ class LearningAlgorithm(LightningModule):
 
     def setup_parameter(
         self, 
-        param: Union[Any, tuple[Union[float, int], Union[float, int], float]],
+        param: Union[int, float, str, Dict],
         dtype: Type = None
     ) -> NumericParameter:
-
-        if isinstance(param, (ListConfig, list, tuple)):
+        
+        if param is None:
+            return param
+        elif isinstance(param, (DictConfig, dict)):
+            return NumericParameter(**param, dtype=dtype)
+        elif isinstance(param, (ListConfig, list, tuple)):
             min_val, max_val, update_coef = param
             val = max_val if update_coef < 1 else min_val
-            return NumericParameter(val, update_coef=update_coef, min=min_val, max=max_val, dtype=dtype)
+            return NumericParameter(val, dtype=dtype)
         else:
             return NumericParameter(param, dtype=dtype)
 
@@ -261,16 +319,31 @@ class LearningAlgorithm(LightningModule):
         for name, param in self.param_container.items():
             setattr(self, name, param.update())
     
-    def _get_dataloader(self, params: Union[TrainingParams, ValidationParams, TestParams]):
+    def _get_dataloader(self, params: Union[TrainingParams, ValidationParams, TestParams], dataset_dist = None):
 
-        dataloader = EnvLoader(
-            env=self.env,
-            batch_size=params.batch_size,
-            dataset_size=params.dataset_size,
-            reload_every_n=1,
-            mode="val",
-            dataset_distribution=self.generator_distribution,
-        )
+        try:
+            dataloader = get_file_dataloader(
+                self.env, 
+                params.batch_size, 
+                params.data_dir,
+                params.num_file_instances,
+                **params.file_loader_kwargs
+            )
+        except FileNotFoundError:
+            dataloader = {}
+
+        if params.dataset_size > 0:
+            synthetic_dl = EnvLoader(
+                env=self.env,
+                batch_size=params.batch_size,
+                dataset_size=params.dataset_size,
+                reload_every_n=1,
+                dataset_distribution=dataset_dist,
+            )
+            dataloader["synthetic"] = synthetic_dl
+
+        if len(dataloader) == 0:
+            self.pylogger.warning(f"No dataset for parameters {params.__class__.__name__}")
 
         return dataloader
 
@@ -280,37 +353,23 @@ class LearningAlgorithm(LightningModule):
             batch_size=self.train_batch_size, 
             dataset_size=self.train_params.dataset_size,
             reload_every_n=1,
-            mode="train",
             dataset_distribution=self.generator_distribution
         )
     
     def val_dataloader(self):
-        val_dl = self._get_dataloader(self.val_params)
-        return val_dl
+        val_dls = self._get_dataloader(self.val_params, dataset_dist=None)
+        val_dl_names, val_dls = list(val_dls.keys()), list(val_dls.values())
+        self.val_set_names = val_dl_names
+        return val_dls
     
     def test_dataloader(self):
-        try:
-            test_file_dls = get_file_dataloader(
-                self.env, 
-                self.test_params.batch_size, 
-                self.test_data_dirs,
-                num_agents=self.model_params.policy.env.num_agents
-            )
-        except FileNotFoundError as e:
-            test_file_dls = {}
+        test_dls = self._get_dataloader(self.test_params, dataset_dist=None)
+        test_dl_names, test_dls = list(test_dls.keys()), list(test_dls.values())
+        self.test_set_names = test_dl_names
+        return test_dls
 
-        if self.test_params.dataset_size > 0:
-            test_dl = self._get_dataloader(self.test_params)
-            test_file_dls["synthetic"] = test_dl
-
-        keys, values = list(test_file_dls.keys()), list(test_file_dls.values())
-        self.test_set_names = keys
-        return values
-
-    def _setup_decoding_strategy(self, params: Union[TrainingParams, ValidationParams, TestParams]):
-        decoding_params = save_config_to_dict(params.decoding)
-        decoding_strategy = decoding_params.pop("decoding_strategy")
-        self.policy.set_decode_type(decoding_strategy, **decoding_params)
+    def _setup_decode_type(self, params: Union[TrainingParams, ValidationParams, TestParams]):
+        self.policy.set_decode_type(params.decoding)
 
     def _get_global_validation_rewards(self):
         # Stack the performance metrics on this GPU (without computing the mean yet)
@@ -337,30 +396,96 @@ class LearningAlgorithm(LightningModule):
 
     def on_train_epoch_start(self) -> None:
         self.train()
-        self._setup_decoding_strategy(self.train_params)
+        self._setup_decode_type(self.train_params)
+
 
     def on_validation_epoch_start(self) -> None:
         self.eval()
-        self._setup_decoding_strategy(self.val_params)
+        self._setup_decode_type(self.val_params)
     
     def on_test_epoch_start(self) -> None:
         self.eval()
-        self._setup_decoding_strategy(self.test_params)
+        self._setup_decode_type(self.test_params)
 
     # @monitor_lr_changes  # NOTE potential issues with multithreading
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             return
-
+        
         self._update_params()
         epoch_averages = self._get_global_validation_rewards()
+        new_avg_reward = self.average_set_metric(epoch_averages)
+
+        improved = False
+        if self.best_avg_reward < new_avg_reward:
+            result_string = "\n".join([
+                f"{idx}: {round(-self.best_rewards[idx], 2)} -> {round(-reward, 2)}" 
+                for idx, reward in epoch_averages.items()
+            ])
+            self.pylogger.info(f"Improved val reward: \n{result_string}")
+            self.best_avg_reward = new_avg_reward
+            improved = True
+
         if hasattr(self, "reduce_on_plateau"):
-            self.reduce_on_plateau.step(epoch_averages[self.monitor_instance])
-        return epoch_averages
+            self.reduce_on_plateau.step(new_avg_reward)
+
+        # update best known rewards
+        new_best_rewards = {
+            instance: epoch_average
+            for instance, epoch_average in epoch_averages.items()
+            if self.best_rewards[instance] < epoch_averages[instance]
+        }
+        self.best_rewards.update(new_best_rewards)
+        self.log("val/reward/avg", new_avg_reward, prog_bar=True, sync_dist=True)
+        # clear cache
+        gc.collect()
+        torch.cuda.empty_cache()
+        return epoch_averages, improved
 
     @property
     def generator_distribution(self):
-        return None
+        env_sizes = [gen.size for gen in self.env.generators]
+        epochs_until_uniform = self.trainer.max_epochs // 2
+        if self.current_epoch < epochs_until_uniform and len(env_sizes) > 1:
+            all_dists = generate_env_curriculum(env_sizes, epochs_until_uniform)
+            if self.current_epoch == 0 and self.logger and isinstance(self.logger, WandbLogger):
+                self.logger.experiment.log(
+                    {
+                        "MultiAgentEnv Probabilities until uniform": wandb.plot.line_series(
+                            xs=list(range(epochs_until_uniform)),
+                            ys=all_dists.T,
+                            keys=[g.id for g in self.env.generators],
+                            title="MultiAgentEnv Probabilities",
+                            xname="Epoch"
+                        )
+                    },
+                )   
+                
+            return all_dists[self.current_epoch]
+        else:
+            return np.ones_like(env_sizes) / len(env_sizes)
+    
+
+    
+    @staticmethod
+    def average_set_metric(epoch_averages):
+        rewards = torch.tensor(list(epoch_averages.values()))
+        scaled_rewards = torch.softmax(-torch.log(-rewards), dim=0) * rewards
+        return scaled_rewards.nan_to_num(nan=0).sum() / scaled_rewards.isfinite().sum()
+    
+    def state_dict(self, *args, **kwargs):
+        # Get the original state_dict
+        state_dict = super().state_dict(*args, **kwargs)
+        # Augment with metadata
+        state_dict["best_rewards"] = self.best_rewards
+        state_dict["best_avg_reward"] = self.best_avg_reward
+        return state_dict
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        # Extract metadata if it exists
+        self.best_rewards = state_dict.pop("best_rewards", getattr(self, "best_rewards", None))
+        self.best_avg_reward = state_dict.pop("best_avg_reward", getattr(self, "best_avg_reward", None))
+        super().load_state_dict(state_dict, *args, **kwargs)
 
 
 class ManualOptLearningAlgorithm(LearningAlgorithm):
@@ -387,31 +512,55 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
 
     # @monitor_lr_changes
     def on_validation_epoch_end(self):
-        epoch_averages = super().on_validation_epoch_end()
         # update learning rate schedulers
         scheduler = self.lr_schedulers()
-        scheduler.step()
-        return epoch_averages
+        if scheduler is not None:
+            scheduler.step()
+        return super().on_validation_epoch_end()
 
-    def manual_opt_step(self, loss) -> None:
+    def manual_opt_step(self, loss, instance_id: str = None) -> None:
         opt = self.optimizers()
-        # opt.zero_grad()
         self.manual_backward(loss)
-        if self.train_params.max_grad_norm is not None:
-            self.clip_gradients(
-                opt,
-                gradient_clip_val=self.train_params.max_grad_norm,
-                gradient_clip_algorithm="norm",
-            )
-        opt.step()
-        opt.zero_grad()
+
+        # Step counter for accumulation
+        if not hasattr(self, "_grad_accum_count"):
+            self._grad_accum_count = 0
+
+        if hasattr(self, "grad_accumulator"):
+            # Accumulate normalized gradient for this difficulty
+            self.grad_accumulator.accumulate()
+
+        self._grad_accum_count += 1
+
+        if self.model_params.log_grad_norm:
+            grad_norm = get_grad_norm(self.policy)
+            instance_id = instance_id or self.env.generators[0].id
+            self.log(f"train/grad_norm/{instance_id}", grad_norm, on_step=False, on_epoch=True)
+
+        if self._grad_accum_count % self.train_params.accumulate_grad_batches == 0:
+
+            if hasattr(self, "grad_accumulator"):
+                # Average the stored gradients and assign them to the policy
+                self.grad_accumulator.average_and_assign()
+
+            if self.train_params.max_grad_norm is not None:
+                # optionally clip gradient magnitude
+                self.clip_gradients(
+                    opt,
+                    gradient_clip_val=self.train_params.max_grad_norm,
+                    gradient_clip_algorithm="norm",
+                )
+            
+            opt.step()
+            opt.zero_grad()
+            self._grad_accum_count = 0  # Reset counter
 
 
 class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def __init__(
         self, 
         env: MultiAgentEnv,
-        policy: nn.Module,
+        policy: RoutingPolicy,
         model_params: ModelWithReplayBufferParams,
         train_params: TrainingParams,
         val_params: ValidationParams,
@@ -426,18 +575,13 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             val_params=val_params,
             test_params=test_params
         )
-        torch.manual_seed(1234567)
+
         self.model_params: ModelWithReplayBufferParams
         self.inner_epochs = self.setup_parameter(model_params.inner_epochs)
-        self._ref_model_temp = self.setup_parameter(model_params.ref_model_temp)
+
         # setup reference policy
-        self.policy_old = copy.deepcopy(self.policy)
-        self.policy_old.set_decode_type(
-            decode_type="sampling", 
-            tanh_clipping=train_params.decoding["tanh_clipping"],
-            top_p=train_params.decoding["top_p"],
-            temperature=self.ref_model_temp
-        )
+        self.ref_policy = copy.deepcopy(self.policy)
+        self.ref_policy.set_decode_type(model_params.ref_model_decoding)
 
         # get rollout batch size
         rollout_batch_size = model_params.rollout_batch_size or train_params.batch_size
@@ -450,31 +594,37 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
             mini_batch_size = int(mini_batch_size * train_params.batch_size)
         self.mini_batch_size = mini_batch_size
 
+        pin_memory = True if model_params.buffer_storage_device == "cpu" else False
         # make replay buffer
         self.rbs = {
             x.id: make_replay_buffer(
                 buffer_size=model_params.buffer_size, 
-                # batch_size=self.mini_batch_size, 
                 device=model_params.buffer_storage_device, 
                 priority_key=model_params.priority_key,
+                pin_memory=pin_memory,
                 **model_params.buffer_kwargs
             ) 
             for x in self.env.generators
         }
         self.rb_ensamble = ReplayBufferEnsemble(
             *self.rbs.values(),
-            num_buffer_sampled=1
+            num_buffer_sampled=1,
+            batch_size=self.mini_batch_size,
+            prefetch=2 if model_params.buffer_storage_device == "cpu" else None,
+            pin_memory=pin_memory,
         )
 
-        self.init_dist = np.array([1.] + [0.] * (len(self.env.generators) - 1), dtype=float)
-        self.tgt_dist = np.array([1 / len(self.env.generators)] * len(self.env.generators), dtype=float)
-        
-    @property
-    def generator_distribution(self):
-        env_sizes = [gen.size for gen in self.env.generators]
-        epochs_until_uniform = self.trainer.max_epochs-10
-        return environment_distribution(np.log(env_sizes), self.current_epoch, epochs_until_uniform, beta=5, temperature=1)
 
+    def clear_buffer(self):
+        self.pylogger.info(f"Emptying replay buffer of size {self.rb_size}")
+        for key, rb in self.rbs.items():
+            rb.empty()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def on_train_end(self):
+        self.clear_buffer()
+        super().on_train_end()
 
     @property
     def rb_size(self):
@@ -500,27 +650,6 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
     def rollout_batch_size(self, value):
         self._rollout_batch_size = value
 
-    @property
-    def mini_batch_size(self):
-        return int(self._mini_batch_size / self.world_size)
-    
-    @mini_batch_size.setter
-    def mini_batch_size(self, value):
-        self._mini_batch_size = value
-
-    @property
-    def ref_model_temp(self):
-        return self._ref_model_temp
-
-    @ref_model_temp.setter
-    def ref_model_temp(self, value):
-        self.ref_model_temp = value
-        self.policy_old.set_decode_type(
-            decode_type="sampling", 
-            tanh_clipping=self.train_params.decoding["tanh_clipping"],
-            top_p=self.train_params.decoding["top_p"],
-            temperature=self.ref_model_temp
-        )  
 
 
 class EvalModule(LearningAlgorithm):
@@ -534,7 +663,7 @@ class EvalModule(LearningAlgorithm):
     ) -> None:
         
         super(LearningAlgorithm, self).__init__()
-        
+        self.pylogger = logger
         self.env = env
         self.policy = policy
         self.test_params = test_params
@@ -546,3 +675,119 @@ class EvalModule(LearningAlgorithm):
     
     def validation_step(self, batch, batch_idx):
         raise NotImplementedError("validation_step not defined for eval module")
+    
+    @classmethod
+    def init_from_checkpoint(cls, checkpoint_path, env_params, model_params = None, train_params = None, val_params = None, test_params = None):
+        assert test_params is not None
+        model, model_params = super().init_from_checkpoint(checkpoint_path, env_params, model_params, train_params, val_params, test_params)
+        return cls(
+            model.env,
+            model.policy,
+            model_params,
+            test_params,
+        ), model_params
+
+class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
+
+    def __init__(self, env, policy, model_params, test_params):
+        super().__init__(env, policy, model_params, test_params)
+        self.pretrained_policy_state = copy.deepcopy(self.policy.state_dict())
+        self.test_params.select_best = True
+        self.as_time_budget = self.test_params.active_search_params.time_budget
+        self.as_lr = self.test_params.active_search_params.lr
+        self.as_bs = self.test_params.active_search_params.bs
+        self.as_inner_epochs = self.test_params.active_search_params.inner_epochs
+        self.num_starts = self.test_params.decoding.num_decoding_samples
+
+
+    def _get_optimizer(self):
+        optimizer_kwargs = config_to_dict(self.train_params.optimizer_kwargs)
+        use_adamw = optimizer_kwargs.pop("use_adamw", False)
+        # rename learning rate key
+        optimizer_kwargs["lr"] = self.as_lr
+        policy_params = self.policy.parameters()
+        if use_adamw:
+            optimizer = AdamW(policy_params, lr=self.as_lr)
+        else:    
+            optimizer = Adam(policy_params, lr=self.as_lr)
+        
+        return optimizer
+
+
+    def on_test_batch_start(self, batch, batch_idx, dataloader_idx = 0):
+        self.rb = TensorDictReplayBuffer(storage=LazyTensorStorage(self.env.max_num_steps, device="auto"))
+
+    def on_test_batch_end(self, outputs, batch, batch_idx, dataloader_idx = 0):
+        self.policy.load_state_dict(copy.deepcopy(self.pretrained_policy_state))
+
+
+    # PyTorch Lightning's built-in test_step method
+    def test_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
+
+        assert batch.size(0) == 1
+        test_set_name = self.test_set_names[dataloader_idx]
+        if batch_idx == 0:
+            self.pylogger.info(f"Start testing on set {test_set_name}")
+
+        state, _ = self.env.reset(batch)
+        start_time = time.time()
+        duration = 0
+
+        curr_best_rew = -torch.inf
+        while duration < self.test_params.active_search_params.time_budget:
+
+            with torch.no_grad():
+                # init storage and perform rollout
+                state_stack = LazyTensorStorage(self.env.max_num_steps, device="auto")
+                done_tds, state_stack = self.policy(state, self.env, storage=state_stack)
+                if done_tds["reward"].mean() > curr_best_rew:
+                    curr_best_rew = done_tds["reward"].mean()
+                # flatten so that every step is an experience
+                state_stack = state_stack.reshape(-1).contiguous()
+                # filter out steps where the instance is already in terminal state. There is nothing to learn from
+                state_stack = state_stack[~state_stack["done"]]
+                if hasattr(self.env, "augment_states"):
+                    state_stack = self.env.augment_states(state_stack)
+
+                self.rb.extend(state_stack)
+
+            for _ in range(self.as_inner_epochs):
+                if duration > self.test_params.active_search_params.time_budget:
+                    self.clear_buffer()
+                    break
+                
+                sub_td = self.rb.sample(self.as_bs).clone().to(self.device).squeeze(0)
+                # get logp of target policy for pseudo expert actions 
+                logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
+                # (bs)
+                loss = ce_loss(logp, entropy, mask=mask).mean()
+                self.manual_opt_step(loss)
+
+                duration = time.time() - start_time
+
+            self.clear_buffer()
+
+
+        self.log(
+            f"test/{test_set_name}/reward", 
+            float(curr_best_rew), 
+            prog_bar=True, 
+            on_step=False, 
+            on_epoch=True, 
+            sync_dist=True,
+            add_dataloader_idx=False,
+        )
+
+        self.log(
+            f"duration/{test_set_name}",
+            duration, 
+            on_step=False, 
+            on_epoch=True, 
+            sync_dist=True,
+            add_dataloader_idx=False,
+        )
+
+    def clear_buffer(self):
+        self.rb.empty()
+        gc.collect()
+        torch.cuda.empty_cache()

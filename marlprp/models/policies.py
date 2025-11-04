@@ -1,29 +1,33 @@
 import torch
 import torch.nn as nn
-from tensordict import TensorDict
 
-from marlprp.env.env import MultiAgentEnv
-from marlprp.utils.ops import batchify
+from tensordict import TensorDict
+from typing import Union, Tuple
+from torchrl.data.replay_buffers.storages import LazyTensorStorage
+
 from marlprp.utils.utils import Registry
+from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
-from marlprp.models.encoder import MatNetEncoder, ETEncoder
+from marlprp.utils.config import DecodingConfig
 from marlprp.models.policy_args import PolicyParams
 from marlprp.models.decoder.base import BaseDecoder
+from marlprp.models.encoder import MatNetEncoder, ETEncoder
 from marlprp.models.decoder.multi_agent import HierarchicalMultiAgentDecoder, HierarchicalParcoDecoder
 from marlprp.models.decoder.single_agent import HierarchicalSingleAgentDecoder, Hierarchical2dPtrDecoder
+
 
 policy_registry = Registry()
 
 
 class RoutingPolicy(nn.Module):
 
-    def __init__(self, model_params: PolicyParams):
+    def __init__(self, params: PolicyParams):
         super().__init__()  
         self.encoder: nn.Module = ...
         self.decoder: BaseDecoder = ...
         self.critic = None
         self.num_starts = None
-        self.stepwise_encoding: bool = model_params.stepwise_encoding
+        self.stepwise_encoding: bool = params.stepwise_encoding
 
 
     @classmethod
@@ -35,43 +39,64 @@ class RoutingPolicy(nn.Module):
     def mode(self):
         return "train" if self.training else "val"
 
+    def _setup_storage(self, size, device = "cpu", **kwargs) -> LazyTensorStorage:
+        return LazyTensorStorage(size, device=device, **kwargs)
+    
     def forward(
-            self, 
-            state: MSPRPState, 
-            env: MultiAgentEnv, 
-            return_actions: bool = False
-        ):
+        self, 
+        problem: MSPRPState, 
+        env: MultiAgentEnv, 
+        return_logp: bool = False,
+        return_trajectories: bool = False,
+        storage: LazyTensorStorage = None,
+        **storage_kwargs
+    ) -> Union[Tuple[MSPRPState, torch.Tensor], Tuple[MSPRPState, torch.Tensor, TensorDict]]:
+        """Function for a full Policy Rollout"""
+        next_state = problem.clone()
+        # pre-rollout hook  
+        next_state = self.decoder.pre_rollout_hook(next_state, env)
         # encoding once
-        embeddings = self.encoder(state)
+        embeddings = self.encoder(next_state)
+        if not self.stepwise_encoding:
+            # cache decoder computations if not re-encoding each step
+            self.decoder.compute_cache(embeddings)
 
-        # pre decoding
-        state, embeddings = self.decoder.pre_forward_hook(state, embeddings)
-        
-        while not state.done.all():
+        # setup optional trajectory buffer
+        if storage is None and (return_trajectories or return_logp):
+            storage = self._setup_storage(env.max_num_steps, **storage_kwargs)
+
+        # generation loop
+        step = 0
+
+        while not next_state.done.all():
             # autoregressive decoding
-            state = self.decoder(embeddings, state, env)["next"]
+            step_dict = self.decoder(embeddings, next_state, env, return_logp=return_logp)
+            next_state = step_dict.pop("next")
+            if storage is not None:
+                # step_dict["mask"] = step_dict["state"].done.clone()
+                storage.set(slice(step, step+1), step_dict.unsqueeze(0).clone())
+
             if self.stepwise_encoding:
-                embeddings = self.encoder(state)
+                # optionally, re-encode
+                embeddings = self.encoder(next_state)
+            # increment step
+            step += 1
 
-        # gather all logps
-        log_ps, actions, state = self.decoder.post_forward_hook(state, env)
         # prepare return td
-        return_dict = {
-            "state": state,
-            "reward": env.get_reward(state, mode=self.mode),
-            "log_likelihood": log_ps.sum(1),
-        }
-
-        if return_actions:
-            return_dict["actions"] = actions
-
-        return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
-
-    def act(self, state: MSPRPState, env: MultiAgentEnv, return_logp: bool = True):
-        embeddings = self.encoder(state)
-        self.decoder.dec_strategy.setup()
-        td = self.decoder(embeddings, state, env, return_logp=return_logp)
+        reward = env.get_reward(next_state)
+        # postprocessing
+        done_td, reward, storage = self.decoder.post_rollout_hook(next_state, reward, storage)
+        # return storage or not
+        if storage is not None:
+            return done_td, reward, storage
+        return done_td, reward
+    
+    
+    def act(self, td, env, **decoder_kwargs) -> TensorDict:
+        embeddings = self.encoder(td)
+        td = self.decoder(embeddings, td, env, **decoder_kwargs)
         return td
+    
     
     def evaluate(self, td: TensorDict, env):
         state: MSPRPState = td["state"]
@@ -79,31 +104,27 @@ class RoutingPolicy(nn.Module):
         action_masks: TensorDict = td["action_mask"]
         # Encoder: get encoder output and initial embeddings from initial state
         embeddings = self.encoder(state)
-        self.decoder.dec_strategy.setup()
         # pred value via the value head
         if self.critic is not None:
             value_pred = self.critic(embeddings, state)
         else:
             value_pred = None
 
-        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, actions, action_masks, state)
+        action_logprobs, entropies, mask = self.decoder.get_logp_of_action(embeddings, state, actions, action_masks, env)
 
         return action_logprobs, value_pred, entropies, mask
 
-    def set_decode_type(self, decode_type, **kwargs):
-        self.decoder._set_decode_strategy(decode_type, **kwargs)
+    def set_decode_type(self, decoding_params: DecodingConfig):
+        self.decoder._set_decode_strategy(decoding_params)
 
 
     @torch.no_grad()
-    def generate(self, td, env=None, phase: str = "train", **kwargs) -> dict:
+    def generate(self, state: MSPRPState, env=None, **kwargs) -> TensorDict:
         is_training = self.training
         self.train(False)
-        assert phase != "train", "dont use generate() in training mode"
-        with torch.no_grad():
-            out = super().__call__(td, env, phase=phase, **kwargs)
+        out = super().__call__(state, env, **kwargs)
         self.train(is_training)
         return out
-
 
 
 @policy_registry.register(name="ham")

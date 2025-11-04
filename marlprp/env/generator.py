@@ -39,6 +39,13 @@ class MSPRPGenerator:
         self._num_agents = instance_params.num_agents
         self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
+    @property
+    def max_num_steps(self):
+        # upper step bound: total demand, reached if every agent picks only 1 item per step
+        max_total_demand = self.max_demand * self.num_skus
+        max_num_agents = np.ceil(max_total_demand / self.capacity)
+        return max_total_demand + 2 * max_num_agents.astype(int)  # +2 steps per agent for depot visits
+
     def _simulate_batch(self, bs: tuple):
         # simulate supply [BS, P, S]
 

@@ -5,7 +5,6 @@ from torch import Tensor
 from einops import rearrange
 import torch.nn.functional as F
 
-from marlprp.models.nn.misc import MLP
 from marlprp.env.instance import MSPRPState
 from marlprp.models.nn.kvl import get_kvl_emb
 from marlprp.models.decoder.base import BasePointer
@@ -76,12 +75,17 @@ class AttentionPointerMechanism(nn.Module):
 
         return logits
 
-    def _inner_mha(self, query, key, value, attn_mask):
+    def _inner_mha(
+        self, 
+        query: torch.Tensor, 
+        key: torch.Tensor, 
+        value: torch.Tensor, 
+        attn_mask: torch.Tensor | None
+    ):
         q = self._make_heads(query)
         k = self._make_heads(key)
         v = self._make_heads(value)
         if attn_mask is not None:
-            # make mask the same number of dimensions as q
             attn_mask = (
                 attn_mask.unsqueeze(1)
                 if attn_mask.ndim == 3
@@ -103,19 +107,12 @@ class AttentionPointer(BasePointer):
     ):
         super(AttentionPointer, self).__init__()
         self.model_params = params
-        self.head_dim = params.qkv_dim
         self.num_heads = params.num_heads
-        self.emb_dim = params.embed_dim
-        self.stepwise_encoding = params.stepwise_encoding
+        self.embed_dim = params.embed_dim
         self.pointer = AttentionPointerMechanism(params, check_nan)
         self.context_embedding = get_context_emb(params, key=decoder_type)
         self.kvl_emb = get_kvl_emb(params, key=decoder_type)
-        self.agent_ranker = MLP(self.emb_dim, 1, num_neurons=[self.emb_dim, self.emb_dim])
 
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
 
     def compute_cache(self, embs: MatNetEncoderOutput) -> None:
         # shape: 3 * (bs, n, emb_dim)
@@ -128,6 +125,7 @@ class AttentionPointer(BasePointer):
 
         # (bs, heads, nodes, key_dim) | (bs, heads, nodes, key_dim)  |  (bs, nodes, emb_dim)
         k, v, logit_key = self.kvl_emb(embs, state)
+
         # (b, a, nodes)
         logits = self.pointer(q, k, v, logit_key, attn_mask=attn_mask)
         return logits

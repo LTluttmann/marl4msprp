@@ -19,13 +19,13 @@ def main(cfg: DictConfig):
 
     test_params = TestParams(**cfg.test)
     gurobi_timeout = test_params.gurobi_timeout
-    test_directory = os.path.dirname(test_params.data_file)
+    test_directory = os.path.dirname(test_params.data_dir)
     solution_file_name = os.path.join(test_directory, f"solutions{str(gurobi_timeout)}.pth")
 
     test_file_dls = get_file_dataloader(
         env=None,
         batch_size=1, 
-        file_dir=test_params.data_file,
+        file_dir=test_params.data_dir,
         num_agents=None
     )
                 

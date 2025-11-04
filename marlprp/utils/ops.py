@@ -1,14 +1,19 @@
 import torch
 import torch.nn as nn
+import functools
+import torch.distributed as dist
+
 from torch import Tensor
 from typing import Union
 from einops import rearrange
-import torch.distributed as dist
 from tensordict import TensorDict
+
 from marlprp.utils.logger import get_lightning_logger
+from marlprp.utils.config import DecodingConfig
 
 
 log = get_lightning_logger(__name__)
+
 
 class NormByConstant(nn.Module):
     """torch module to apply a constant norm factor on an input sequence"""
@@ -76,6 +81,27 @@ def batchify(
     for s in reversed(shape):
         x = _batchify_single(x, s) if s > 0 else x
     return x
+
+def augment_or_batchify(td: TensorDict, env, num_samples: DecodingConfig):
+    bs = td.size(0)
+    num_augment = num_samples.num_augment
+    if num_augment > 1:
+        assert hasattr(env, "augment_states")
+        td = env.augment_states(td, num_augment=num_augment)
+        assert td.size(0) // bs == num_augment, f"Augmentation failed. Expected {num_augment} augmentations, got {td.size(0) // bs}"
+
+    num_strategies = num_samples.num_strategies
+    if num_strategies > 1: 
+        bs = td.size(0)
+        strategy_id = torch.arange(num_strategies, device=td.device).repeat_interleave(bs)
+        td = td.repeat(num_strategies)
+        td["strategy_id"] = strategy_id
+        
+    num_starts = num_samples.num_starts
+    if num_starts > 1:
+        # Expand td to batch_size * num_starts
+        td = batchify(td, num_starts)
+    return td, num_starts
 
 
 def _unbatchify_single(

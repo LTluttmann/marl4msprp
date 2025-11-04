@@ -1,9 +1,10 @@
-from typing import Union
-from omegaconf import DictConfig
-from functools import partial
-
+import os
 import torch
 import numpy as np
+
+from typing import Union
+from functools import partial
+from omegaconf import DictConfig, ListConfig
 
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import Sampler
@@ -184,29 +185,25 @@ class EnvLoader(DataLoader):
             )
         
 
-def get_file_dataloader(env, batch_size: int, file_dir: Union[dict, str] = None, num_agents = None):
-    if file_dir is None:
+def get_file_dataloader(env, batch_size: int, file_dirs: Union[list, str] = None, num_agents = None):
+    if file_dirs is None:
         return {}
     
-    if isinstance(file_dir, (dict, DictConfig)):
-        dataloader = {
-            file_name: EnvLoader(
+    file_dirs = [file_dirs] if not isinstance(file_dirs, (list, ListConfig)) else file_dirs
+    dataloader = {}
+    for file_dir in file_dirs:
+        dl_id = os.path.basename(os.path.dirname(file_dir))
+        try:
+            dataloader[dl_id] = EnvLoader(
                 env=env,
                 path=file_dir, 
                 batch_size=batch_size,
                 read_fn=partial(read_icaps_instances, num_agents=num_agents)
             )
-            for file_name, file_dir in file_dir.items()
-        }
-    elif isinstance(file_dir, str):
-        dataloader = EnvLoader(
-            env=env,
-            path=file_dir, 
-            batch_size=batch_size,
-            read_fn=partial(read_icaps_instances, num_agents=num_agents)
-        )
-    else:
-        raise ValueError(f"Expected str or dict for param file_dir, got {file_dir}")
+        except FileNotFoundError:
+            continue
+    if len(dataloader) == 0:
+        raise FileNotFoundError(f"No valid files found in paths: {file_dirs}")
     return dataloader
 
 

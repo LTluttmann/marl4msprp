@@ -1,19 +1,22 @@
 import gc
 import copy
-from functools import partial
-from omegaconf import DictConfig
-
 import torch
 import torch.nn as nn
-import torch.distributed as dist
+
+from omegaconf import DictConfig
 from tensordict import TensorDict
+from torchrl.data import LazyTensorStorage
 
 from marlprp.env.env import MultiAgentEnv
-from marlprp.utils.ops import batchify, unbatchify
+from marlprp.env.instance import MSPRPState
 from marlprp.algorithms.model_args import SelfLabelingParameters
+from marlprp.utils.ops import batchify, unbatchify, gather_by_index
 from marlprp.algorithms.base import LearningAlgorithmWithReplayBuffer
 from marlprp.algorithms.losses import ce_loss, simple_listnet_loss, calc_adv_weights
 from marlprp.utils.config import TrainingParams, ValidationParams, TestParams
+
+
+_float = torch.get_default_dtype()
 
 
 class SelfLabeling(LearningAlgorithmWithReplayBuffer):
@@ -44,61 +47,112 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         if self.model_params.lookback_intervals:
             self.old_tgt_policy_state = copy.deepcopy(self.policy.state_dict())
 
-        self.penalty_coef = model_params.penalty_coef
-        self.num_starts = self.setup_parameter(model_params.num_starts, dtype=int)
+        self.num_starts = model_params.ref_model_decoding.num_samples
+        self.penalty_coef = self.setup_parameter(model_params.penalty_coef)
         self.entropy_coef = self.setup_parameter(model_params.entropy_coef)
         self.lookback_intervals = self.setup_parameter(
             model_params.lookback_intervals,
             dtype=lambda x: int(x) or float("inf")
         )
-       
-        self.best_rewards = {instance: float("-inf") for instance in self.rbs.keys()}
 
         if model_params.loss == "ce":
             self.loss_fn = ce_loss
         else:
             self.loss_fn = simple_listnet_loss
 
-        self.always_clear_buffer = model_params.always_clear_buffer
         self.update_after_every_batch = model_params.update_after_every_batch
+        if self.update_after_every_batch:
+            # if we update after every batch, we always need to flush the buffer afterwards, otherwise
+            # examples of earlier batches are seen more often during training then thoss of later batches
+            self.always_clear_buffer = True
+        else:
+            self.always_clear_buffer = model_params.always_clear_buffer
+
+    def _update_rb_sampler_probs(self):
+        if len(self.rb_ensamble.storage) == 1:
+            return
+        rb_distribution = torch.tensor([len(x) for x in self.rb_ensamble.storage], device=self.device)
+        rb_distribution = torch.where(rb_distribution == 0, -torch.inf, rb_distribution)
+        rb_distribution = torch.softmax(rb_distribution / 1000, dim=0)
+        self.rb_ensamble.sampler.p = rb_distribution
+
+    def get_buffer_id(self, sub_td):
+        return list(self.rbs.keys())[sub_td["index"]["buffer_ids"][0]]
 
     def _update(self):
         losses = []
-
-        rb_distribution = torch.tensor([len(x) for x in self.rb_ensamble.storage], device=self.device)
-        rb_distribution = torch.where(rb_distribution == 0, -torch.inf, rb_distribution)
-        rb_distribution = torch.softmax(rb_distribution, dim=0)
-        self.rb_ensamble.sampler.p = rb_distribution
-
+        entropies = []
+        self._update_rb_sampler_probs()
         for _ in range(self.num_training_batches):
-
-            sub_td = self.rb_ensamble.sample(self.mini_batch_size)[0]
-            sub_td = sub_td.to(self.device)
-
-            weight = sub_td.get("_weight", None)
-
+            sub_td = self.rb_ensamble.sample().clone().to(self.device).squeeze(0)
+            buffer_id = self.get_buffer_id(sub_td)
+            # get logp of target policy for pseudo expert actions 
             logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
-
+            # (bs)
             loss = self.loss_fn(logp, entropy, mask=mask, entropy_coef=self.entropy_coef)
-
             # (bs)
             adv_weights = sub_td.get("adv_weights", None)
             if adv_weights is not None:
                 loss = loss * adv_weights
-
+            # (bs)
+            weight = sub_td.get("_weight", None)
             # aggregate loss: bs -> 1
             if weight is not None:
                 loss = (loss * weight).sum() / weight.sum()
             else:
                 loss = loss.mean()
-
-            self.manual_opt_step(loss)
+            self.manual_opt_step(loss, buffer_id)
             losses.append(loss.detach())
+            entropies.append(entropy.mean())
 
         loss = torch.stack(losses, dim=0).mean()
-        self.log("train/loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        entropy = torch.stack(entropies, dim=0).mean()
+        self.log("train/entropy", entropy, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         if self.always_clear_buffer:
             self.clear_buffer()
+
+
+    @torch.no_grad
+    def _collect_experience(self, next_state: MSPRPState, instance_id: str):
+        # init storage and perform rollout
+        state_stack = LazyTensorStorage(self.env.max_num_steps, device=self.model_params.buffer_storage_device)
+        done_states, rewards, state_stack = self.ref_policy(next_state, self.env, storage=state_stack)
+        # (bs, #samples, #steps)
+        state_stack = unbatchify(state_stack, self.num_starts)
+        # (bs, #samples)
+        rewards = unbatchify(rewards, self.num_starts).to(state_stack.device)
+        steps = (~state_stack["state"].done).sum(-1).to(_float)
+        # (bs); add step penalty and very small noise to randomize tie breaks
+        best_idx = torch.argmax(rewards - self.penalty_coef * steps + torch.rand_like(rewards) * 1e-9, dim=1)
+        best_reward = gather_by_index(rewards, best_idx)
+        # store rollout results
+        self.max_rewards.append(best_reward)
+        self.train_rewards.append(rewards.mean(1))
+        self.reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
+        self.avg_steps.append(steps.mean())
+
+        # (bs)
+        best_states = gather_by_index(state_stack, best_idx, dim=1)
+
+        if self.model_params.use_advantage_weights:
+            advantage = best_reward - rewards.mean(1, keepdim=False)
+            adv_weights = calc_adv_weights(advantage, temp=2.5, weight_clip=10.)
+            best_states["adv_weights"] = adv_weights.unsqueeze(1).expand(*best_states.shape)
+
+        # flatten so that every step is an experience
+        best_states = best_states.reshape(-1).contiguous()
+        # filter out steps where the instance is already in terminal state. There is nothing to learn from
+        best_states = best_states[~best_states["state"].done]
+        if not self.model_params.eval_multistep and self.ref_policy.ma_policy:
+            # if we have a multi-agent policy (generating M action per step) but want to train the model only
+            # on a single action, we need to flatten the agent index in the batch dimension 
+            best_states = self.flatten_multi_action_td(best_states)
+        if hasattr(self.env, "augment_states"):
+            best_states = self.env.augment_states(best_states)
+        # save to buffer
+        self.rbs[instance_id].extend(best_states)
+
 
     def training_step(self, batch: TensorDict, batch_idx: int):
         batch, instance_id = batch
@@ -106,140 +160,172 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         bs = orig_state.size(0)
 
         if isinstance(self.rollout_batch_size, (dict, DictConfig)):
-            rollout_batch_size = self.rollout_batch_size.get(instance_id, self.train_batch_size)
+            rollout_batch_size = self.rollout_batch_size.get(instance_id)
         else:
             rollout_batch_size = self.rollout_batch_size
 
-        avg_steps = []
-        reward_std = []
-        train_rewards = []
         # data gathering loop
         for i in range(0, bs, rollout_batch_size):
-
             next_state = orig_state[i : i + rollout_batch_size]
-
-            next_state = batchify(next_state, self.num_starts)
-            state_stack = []
-            steps = 0
-            while not next_state.done.all():
-
-                with torch.no_grad():
-                    td = self.policy_old.act(next_state, self.env, return_logp=False)
-                    next_state = td.pop("next")
-
-                if not self.model_params.eval_multistep and td["action"].dim() == 2:
-                    action = td["action"].clone()
-                    pad_mask = td["state"].agent_pad_mask.clone()
-                    aug_bs, n_actions = action.shape
-                    td = td.unsqueeze(1).expand(aug_bs, n_actions)
-                    td["action"] = action.unsqueeze(-1)
-                    td["mask"] = torch.logical_or(td["state"].done, pad_mask)
-                    steps += n_actions
-                else:
-                    td["mask"] = td["state"].done.clone()
-                    td = td.unsqueeze(1)
-                    steps += 1
-
-                # add tensordict to buffer
-                state_stack.append(td)
-                if steps > 1000:
-                    raise ValueError()
-            # (bs * #samples, #steps)
-            state_stack = torch.cat(state_stack, dim=1)
-            # (bs, #samples, #steps)
-            states_unbs = unbatchify(state_stack, self.num_starts)
-            # (bs * #samples)
-            rewards = self.env.get_reward(next_state, mode="train")
-            # (bs, #samples)
-            rewards = unbatchify(rewards, self.num_starts)
-            # store rollout results
-            train_rewards.append(rewards.mean(1))
-            reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
-            steps_till_done = (~states_unbs["mask"]).sum(-1).float()
-            avg_steps.append(steps_till_done.mean())
-            # (bs); add very small noise to randomize tie breaks
-            best_idx = torch.argmax(rewards - self.penalty_coef * steps_till_done + torch.rand_like(rewards) * 1e-9, dim=1)
-            # best_rew, best_idx = rewards.max(dim=1)
-            # (bs)
-            best_states = states_unbs.gather(
-                1, best_idx[:, None, None].expand(-1, 1, steps)
-            ).squeeze(1)
-
-            # flatten so that every step is an experience
-            best_states = best_states.flatten()
-            # filter out steps where the instance is already in terminal state. There is nothing to learn from
-            best_states = best_states[~best_states["mask"]]
-            # save to memory
-            self.rbs[instance_id].extend(best_states)
-            # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
-
-        avg_steps = torch.stack(avg_steps, 0).mean()
-        reward_std = torch.cat(reward_std, 0).mean()
-        train_reward = torch.cat(train_rewards, 0).mean()
-        self.log("train/avg_steps", avg_steps, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/reward_std", reward_std, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/reward_mean", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
+            self._collect_experience(next_state, instance_id)
 
         if self.trainer.is_last_batch or self.update_after_every_batch:
             self._update()
 
-        dummy_loss = torch.tensor(0.0, device=self.device)  # dummy loss
-        return {"loss": dummy_loss, "reward": train_reward}
+
+    # def training_step(self, batch: TensorDict, batch_idx: int):
+    #     batch, instance_id = batch
+    #     orig_state = self.env.reset(batch)
+    #     bs = orig_state.size(0)
+
+    #     if isinstance(self.rollout_batch_size, (dict, DictConfig)):
+    #         rollout_batch_size = self.rollout_batch_size.get(instance_id, self.train_batch_size)
+    #     else:
+    #         rollout_batch_size = self.rollout_batch_size
+
+    #     avg_steps = []
+    #     reward_std = []
+    #     train_rewards = []
+    #     # data gathering loop
+    #     for i in range(0, bs, rollout_batch_size):
+
+    #         next_state = orig_state[i : i + rollout_batch_size]
+
+    #         next_state = batchify(next_state, self.num_starts)
+    #         state_stack = []
+    #         steps = 0
+    #         while not next_state.done.all():
+
+    #             with torch.no_grad():
+    #                 td = self.policy_old.act(next_state, self.env, return_logp=False)
+    #                 next_state = td.pop("next")
+
+    #             if not self.model_params.eval_multistep and td["action"].dim() == 2:
+    #                 action = td["action"].clone()
+    #                 pad_mask = td["state"].agent_pad_mask.clone()
+    #                 aug_bs, n_actions = action.shape
+    #                 td = td.unsqueeze(1).expand(aug_bs, n_actions)
+    #                 td["action"] = action.unsqueeze(-1)
+    #                 td["mask"] = torch.logical_or(td["state"].done, pad_mask)
+    #                 steps += n_actions
+    #             else:
+    #                 td["mask"] = td["state"].done.clone()
+    #                 td = td.unsqueeze(1)
+    #                 steps += 1
+
+    #             # add tensordict to buffer
+    #             state_stack.append(td)
+    #             if steps > 1000:
+    #                 raise ValueError()
+    #         # (bs * #samples, #steps)
+    #         state_stack = torch.cat(state_stack, dim=1)
+    #         # (bs, #samples, #steps)
+    #         states_unbs = unbatchify(state_stack, self.num_starts)
+    #         # (bs * #samples)
+    #         rewards = self.env.get_reward(next_state, mode="train")
+    #         # (bs, #samples)
+    #         rewards = unbatchify(rewards, self.num_starts)
+    #         # store rollout results
+    #         train_rewards.append(rewards.mean(1))
+    #         reward_std.append(rewards.std(1) / (-rewards.mean(1) + 1e-6))
+    #         steps_till_done = (~states_unbs["mask"]).sum(-1).float()
+    #         avg_steps.append(steps_till_done.mean())
+    #         # (bs); add very small noise to randomize tie breaks
+    #         best_idx = torch.argmax(rewards - self.penalty_coef * steps_till_done + torch.rand_like(rewards) * 1e-9, dim=1)
+    #         # best_rew, best_idx = rewards.max(dim=1)
+    #         # (bs)
+    #         best_states = states_unbs.gather(
+    #             1, best_idx[:, None, None].expand(-1, 1, steps)
+    #         ).squeeze(1)
+
+    #         # flatten so that every step is an experience
+    #         best_states = best_states.flatten()
+    #         # filter out steps where the instance is already in terminal state. There is nothing to learn from
+    #         best_states = best_states[~best_states["mask"]]
+    #         # save to memory
+    #         self.rbs[instance_id].extend(best_states)
+    #         # self.log("train/rb_size", len(self.rb), on_step=True, sync_dist=True)
+
+    #     avg_steps = torch.stack(avg_steps, 0).mean()
+    #     reward_std = torch.cat(reward_std, 0).mean()
+    #     train_reward = torch.cat(train_rewards, 0).mean()
+    #     self.log("train/avg_steps", avg_steps, on_epoch=True, prog_bar=False, sync_dist=True)
+    #     self.log("train/reward_std", reward_std, on_epoch=True, prog_bar=False, sync_dist=True)
+    #     self.log("train/reward_mean", train_reward, on_epoch=True, prog_bar=True, sync_dist=True)
+
+    #     if self.trainer.is_last_batch or self.update_after_every_batch:
+    #         self._update()
+
+    #     dummy_loss = torch.tensor(0.0, device=self.device)  # dummy loss
+    #     return {"loss": dummy_loss, "reward": train_reward}
 
     def on_validation_epoch_end(self):
         if self.trainer.sanity_checking:
             return
         
-        improved = False
-        epoch_averages = super().on_validation_epoch_end()
-        if self.improved_at_least_half(epoch_averages):
-            result_string = "\n".join([f"{idx}: {round(-self.best_rewards[idx], 2)} -> {round(-reward, 2)}" for idx, reward in epoch_averages.items()])
-            self.pylogger.info(
-                f"Improved val reward: \n{result_string} \nUpdating Reference Policy..."
-            )
-            improved = True
-            self.best_rewards.update(epoch_averages)
-            self.policy_old.load_state_dict(copy.deepcopy(self.policy.state_dict()))
+        _, improved = super().on_validation_epoch_end()
 
-        if self.always_clear_buffer or improved:
-            self.clear_buffer()
+        if improved:
+            self.pylogger.info("Updating Reference Policy...")
+            self.ref_policy.load_state_dict(copy.deepcopy(self.policy.state_dict()))
 
-        if ((self.current_epoch + 1) % self.lookback_intervals == 0) and (self.current_epoch + self.lookback_intervals < self.trainer.max_epochs):
+            if not self.always_clear_buffer:
+                self.clear_buffer()
+
+        if (
+            ((self.current_epoch + 1) % self.lookback_intervals == 0) and 
+            (self.current_epoch + self.lookback_intervals < self.trainer.max_epochs)
+        ):
             self.policy.load_state_dict(copy.deepcopy(self.old_tgt_policy_state))
-            self.old_tgt_policy_state = copy.deepcopy(self.policy_old.state_dict())
+            self.old_tgt_policy_state = copy.deepcopy(self.ref_policy.state_dict())
 
-    def clear_buffer(self):
-        self.pylogger.info(f"Emptying replay buffer of size {self.rb_size}")
-        for rb in self.rbs.values():
-            rb.empty()
-        gc.collect()
-        torch.cuda.empty_cache()
+        if self.model_params.ref_policy_warmup == (self.current_epoch + 1):
+            self._reset_target_policy()
+  
+    def on_train_batch_start(self, batch, batch_idx):
+        super().on_train_batch_start(batch, batch_idx)
+        self.avg_steps = []
+        self.reward_std = []
+        self.train_rewards = []
+        self.max_rewards = []
+        if "ffsp" in self.env.name:
+            self.n_skip_tok = []
 
-    def state_dict(self, *args, **kwargs):
-        # Get the original state_dict
-        state_dict = super().state_dict(*args, **kwargs)
-        # Augment with metadata
-        state_dict["best_rewards"] = self.best_rewards
-        return state_dict
+    
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        super().on_train_batch_end(outputs, batch, batch_idx)
+        avg_steps = torch.stack(self.avg_steps, 0).mean()
+        reward_std = torch.cat(self.reward_std, 0).mean()
+        train_reward = torch.cat(self.train_rewards, 0).mean()
+        max_rewards = torch.cat(self.max_rewards, 0).mean()
+        self.log("train/avg_steps", avg_steps, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/reward_std", reward_std, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/reward_mean", train_reward, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/max_rewards", max_rewards, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        if "ffsp" in self.env.name:
+            n_skip_tok = torch.stack(self.n_skip_tok, 0).mean()
+            self.log("train/n_skip_tok", n_skip_tok, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
 
-    def load_state_dict(self, state_dict, *args, **kwargs):
-        # Extract metadata if it exists
-        self.best_rewards = state_dict.pop("best_rewards", self.best_rewards)
-        # Load the remaining state_dict
-        super().load_state_dict(state_dict, *args, **kwargs)
+    def _reset_target_policy(self):
+        for layer in self.policy.modules():
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
 
-    def is_pareto_efficient(self, epoch_averages):
-        not_worse = [epoch_reward >= self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
-        better = [epoch_reward > self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
-        return all(not_worse) and any(better)
-
-    def improved_at_least_half(self, epoch_averages):
-        better = [epoch_reward > self.best_rewards[instance] for instance, epoch_reward in epoch_averages.items()]
-        return sum(better) / len(epoch_averages) > .5
-   
-    # def on_train_batch_end(self, outputs, batch, batch_idx):
-    #     super().on_train_batch_end(outputs, batch, batch_idx)
-    #     if self.model_params.update_after_every_batch:
-    #         self.pylogger.info(f"Emptying replay buffer of size {len(self.rb)}")
-    #         self.rb.empty()
-    #         torch.cuda.empty_cache()
+    def flatten_multi_action_td(self, td: TensorDict):
+        """This function flattens out the 'action dimension' in multi agent settings. This means,
+        every action from a multi agent policy will be stored as a seperate experience in the
+        resulting tensordict."""
+        if not (td["action"]["idx"].dim() == 2 and td["action"]["idx"].size(1) > 1):
+            # tensordict is already flat
+            return td
+        assert td.dim() == 1
+        flat_td = td.clone()
+        bs, n_actions = td["action"]["idx"].shape
+        action: TensorDict = flat_td["action"].clone()
+        action.batch_size = (bs, n_actions)
+        # (n_actions, bs)
+        flat_td = flat_td.unsqueeze(0).expand(n_actions, bs).contiguous()
+        flat_td["action"] = action.permute(1, 0).contiguous()
+        flat_td = flat_td.view(bs * n_actions)
+        return flat_td
+    

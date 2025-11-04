@@ -30,8 +30,6 @@ class TransformerParams(PolicyParams):
         self.qkv_dim = self.embed_dim // self.num_heads
         assert self.embed_dim % self.num_heads == 0, "self.kdim must be divisible by num_heads"
         self.ms_hidden_dim = self.ms_hidden_dim or self.qkv_dim
-        if self.ms_sparse_attn and self.param_sharing:
-            raise NotImplementedError("sparse attention with parameter sharing not implemented yet")
 
 
 @dataclass(kw_only=True)

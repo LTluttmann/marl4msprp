@@ -39,6 +39,11 @@ class MultiAgentEnv:
         self.generators = sorted(self.generators, key=lambda x: x.size)
         self.use_stay_token = self.params.use_stay_token
 
+
+    @property
+    def max_num_steps(self):
+        return max([g.max_num_steps for g in self.generators])
+
     @classmethod
     def initialize(cls, params: EnvParams):
         EnvCls = env_registry.get(params.name)
@@ -55,7 +60,6 @@ class MultiAgentEnv:
         return self._reset(td)
 
     def _reset(self, td: TensorDict) -> MSPRPState:
-
         state = MSPRPState.initialize(
             **td.clone(),
         )
@@ -83,6 +87,7 @@ class MultiAgentEnv:
                 state = self._update_from_sku(state, sku, curr_agent=agent, units=units)
                 #state.shelf_mask = self.get_node_mask(state)
 
+        state.done = (state.demand.le(1e-5).all(-1) & state.agent_at_depot().all(-1))
         return state
 
     def _update_from_shelf(self, state: MSPRPState, next_node: torch.Tensor, current_agent: torch.Tensor):

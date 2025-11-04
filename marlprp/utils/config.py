@@ -1,8 +1,9 @@
+import warnings
 import torch.nn as nn
 
 from copy import copy
 from omegaconf import OmegaConf
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Dict, Type, List, Union, Optional, Any
 
 from marlprp.utils.logger import get_lightning_logger
@@ -19,12 +20,65 @@ policy_config_registry: Dict[str, Type['PolicyParams']] = {}
 env_config_registry: Dict[str, Type['PolicyParams']] = {}
 
 
-def save_config_to_dict(config_struct: Union[OmegaConf, Dict]):
+def config_to_dict(config_struct: Union[OmegaConf, Dict]):
     try:
         config_struct = OmegaConf.to_container(config_struct)
     except ValueError:
         config_struct = copy(config_struct)
     return config_struct
+
+
+@dataclass(frozen=True)
+class DecodingConfig:
+    decode_type: Literal["greedy", "sampling"]
+    tanh_clipping: float
+    top_p: float
+    temperature: float
+    num_starts: int = None
+    num_augment: int = None
+    num_strategies: int = None
+    select_best: bool = False
+    hybrid_decoding: bool = False
+    num_decoding_samples: int = None
+
+    def __post_init__(self):
+        # Normalize all fields
+        object.__setattr__(self, "num_starts", self._normalize(self.num_starts))
+        object.__setattr__(self, "num_augment", self._normalize(self.num_augment))
+        object.__setattr__(self, "num_strategies", self._normalize(self.num_strategies))
+
+        if self.num_decoding_samples is not None:
+            if self.num_starts > 1:
+                assert self.num_samples == self.num_decoding_samples, "Specified both, num_starts and num_decoding_samples. Use only one of the two"
+            else:
+                num_starts = self.num_decoding_samples // (self.num_strategies * self.num_augment)
+                assert num_starts >= 1, "Specified num_decoding_samples smaller than the product of augmentations and strategies. Check config."
+                object.__setattr__(self, "num_starts", num_starts)
+                if self.num_samples < self.num_decoding_samples:
+                    warnings.warn(f"Decoding samples ({self.num_samples}) smaller than specified ({self.num_decoding_samples}). Check config.")
+                    
+
+    @staticmethod
+    def _normalize(value) -> int:
+        # If None → default to 1
+        if value is None:
+            return 1
+        # If not int → try to cast
+        if not isinstance(value, int):
+            try:
+                value = int(value)
+            except Exception:
+                return 1  # fallback if conversion fails
+        # Enforce minimum of 1
+        return max(1, value)
+
+    @property
+    def num_samples(self) -> int:
+        return self.num_starts * self.num_augment * self.num_strategies
+    
+    def change_decode_type(self, decode_type: Literal["greedy", "sampling"]):
+        return replace(self, decode_type=decode_type)
+
 
 
 @dataclass
@@ -46,12 +100,11 @@ class BaseEnvParams:
     avg_supply_to_demand_ratio: float = 2
 
     capacity: int = 6
-
-    is_multi_instance: bool = False
     
     packing_ratio_penalty: float = 0.0
 
     goal: str = None
+    num_augment: int = None
 
     def __post_init__(self):
 
@@ -90,6 +143,7 @@ class EnvParams(BaseEnvParams):
     size: int = field(init=False)
     use_stay_token: bool = False
     
+
     def __post_init__(self):
         super().__post_init__()
         self.num_storage_locations = infer_num_storage_locations(
@@ -164,14 +218,15 @@ class PolicyParams:
     env: Type["EnvParams"]
     config: str = None # the name of the config to use (as appears in the config_registry)
     embed_dim: int = 256
+    bias: bool = True
     num_encoder_layers: int = 4
     dropout: float = 0.0
-    eval_multistep: bool = True
-    eval_per_agent: bool = True
-    # to be specified by the learning algorithm
-    _use_critic: bool = False
-    _stepwise_encoding: bool = False
     is_multiagent_policy: bool = True
+    # to be specified by the learning algorithm
+    eval_multistep: bool = field(init=False)
+    eval_per_agent: bool = field(init=False)
+    use_critic: bool = field(init=False)
+    stepwise_encoding: bool = field(init=False)
 
     def __init_subclass__(cls, *args, **kw):
         super().__init_subclass__(*args, **kw)
@@ -192,21 +247,6 @@ class PolicyParams:
     def __post_init__(self):
         self.config = self.config or self.policy
     
-    @property
-    def stepwise_encoding(self):
-        return self._stepwise_encoding
-    
-    @stepwise_encoding.setter
-    def stepwise_encoding(self, value: bool):
-        self._stepwise_encoding = value
-
-    @property
-    def use_critic(self):
-        return self._use_critic
-    
-    @use_critic.setter
-    def use_critic(self, value: bool):
-        self._use_critic = value
 
 
 @dataclass(kw_only=True)
@@ -217,13 +257,15 @@ class ModelParams:
     # model architecture
     algorithm: str = None
     stepwise_encoding: bool = False
-    ref: str = None
     warmup_params: "ModelParams" = None
     eval_multistep: bool = False
     eval_per_agent: bool = True
+    use_critic: bool = False
+    log_grad_norm: bool = False
 
     def __post_init__(self):
         self.policy.stepwise_encoding = self.stepwise_encoding
+        self.policy.use_critic = self.use_critic
         self.eval_multistep = self.eval_multistep and self.policy.is_multiagent_policy and (
             self.policy.env.num_agents is None or self.policy.env.num_agents > 1
         )
@@ -257,7 +299,7 @@ class ModelWithReplayBufferParams(ModelParams):
     inner_epochs: int = None
     mini_batch_size: int = None
     rollout_batch_size: int = None
-    buffer_storage_device: Literal["gpu", "cpu"] = "gpu"
+    buffer_storage_device: Literal["gpu", "cpu"] = "cpu"
     buffer_size: int = 1_000_000
     # replay buffers allow us to gather experience in evaluation mode
     # Thus, memory leakage through growing gradient information is avoided
@@ -267,14 +309,75 @@ class ModelWithReplayBufferParams(ModelParams):
         "priority_beta": 0.8
     })
     priority_key: str = None
-    ref_model_temp = 1.0
+    # ref model decoding
+    ref_model_decode_type: Literal["greedy", "sampling"] = "sampling"
+    ref_model_top_p: float = 1
+    ref_model_tanh_clipping: float = 10.0
+    ref_model_temp: float = 1
+    ref_model_num_starts: int = None
+    ref_model_num_augment: int = None
+    ref_model_num_strategies: int = None
+    ref_model_select_best: bool = True
+    ref_model_hybrid_decoding: bool = False
+    ref_model_num_decoding_samples: int = None
     
 
-@dataclass
-class TrainingParams:
-    # data
+    @property
+    def ref_model_decoding(self):
+        return DecodingConfig(
+            decode_type=self.ref_model_decode_type,
+            top_p=self.ref_model_top_p,
+            tanh_clipping=self.ref_model_tanh_clipping,
+            temperature=self.ref_model_temp,
+            num_starts=self.ref_model_num_starts,
+            num_augment=self.ref_model_num_augment,
+            num_strategies=self.ref_model_num_strategies,
+            select_best=self.ref_model_select_best,
+            hybrid_decoding=self.ref_model_hybrid_decoding,
+            num_decoding_samples=self.ref_model_num_decoding_samples
+        )
+
+
+@dataclass(kw_only=True)
+class PhaseParams:
+    #data
     batch_size: int
     dataset_size: int
+    data_dir: str = None
+    num_file_instances: int = None
+    file_loader_kwargs: dict = field(default_factory=dict)
+
+    # decoding
+    decode_type: Literal["greedy", "sampling"] = "sampling"
+    top_p: float = 1
+    tanh_clipping: float = 10.0
+    temperature: float = 1
+    num_starts: int = None
+    num_augment: int = None
+    num_strategies: int = None
+    select_best: bool = True
+    hybrid_decoding: bool = False
+    num_decoding_samples: int = None
+
+    @property
+    def decoding(self) -> DecodingConfig:
+        return DecodingConfig(
+            decode_type=self.decode_type,
+            top_p=self.top_p,
+            tanh_clipping=self.tanh_clipping,
+            temperature=self.temperature,
+            num_starts=self.num_starts,
+            num_augment=self.num_augment,
+            num_strategies=self.num_strategies,
+            select_best=self.select_best,
+            hybrid_decoding=self.hybrid_decoding,
+            num_decoding_samples=self.num_decoding_samples
+        )
+
+
+
+@dataclass
+class TrainingParams(PhaseParams):
     # training
     checkpoint: Optional[str] = None
     train: bool = True
@@ -285,11 +388,12 @@ class TrainingParams:
     lr_scheduler: str = None
     lr_scheduler_kwargs: Dict[str, Any] = field(default_factory= lambda: {})
     lr_scheduler_interval: int = 1
-    lr_scheduler_monitor: str = "val/reward"
-    lr_reduce_on_plateau_patience: int = 3
+    lr_scheduler_monitor: str = "val/reward/avg"
+    lr_reduce_on_plateau_patience: int = 5
     max_grad_norm: float = 1.
     epochs: int = 10
     accumulate_grad_batches: int = 1
+    norm_curriculum_grad: bool = False
 
     precision: str = "32-true"
     distribution_strategy: str = "auto"
@@ -297,83 +401,20 @@ class TrainingParams:
     devices: List[int] = None
     reload_every_n: int = 1
     
-    # decoding
-    tanh_clipping: float = 10.0
-    top_p: float = 1
-    temperature: float = 1
-    decode_type: Literal["greedy", "sampling"] = "sampling"
-    num_decoding_samples: int = None
-    warmup_epochs: int = None
-
     seed: int = 1234567
-
+    data_dir = None
     monitor_instance: str = None  # instance used for monitoring
 
-    def __post_init__(self):
-        self.n_devices = len(self.devices)
 
-    @property
-    def decoding(self):
-        return {
-            "decoding_strategy": self.decode_type,
-            "tanh_clipping": self.tanh_clipping,
-            "top_p": self.top_p,
-            "temperature": self.temperature,
-        }
-    
 
 @dataclass
-class ValidationParams:
-    #data
-    dataset_size: int
-    batch_size: int
-    data_dir: str = None
+class ValidationParams(PhaseParams):
+    decode_type: str = "greedy"
 
-    # decoding
-    tanh_clipping: float = 10.0
-    top_p: float = 1
-    temperature: float = 1
-    decode_type: Literal["greedy", "sampling"] = "greedy"
-    num_decoding_samples: int = None
-
-    @property
-    def decoding(self) -> dict:
-        return {
-            "decoding_strategy": self.decode_type,
-            "tanh_clipping": self.tanh_clipping,
-            "top_p": self.top_p,
-            "temperature": self.temperature,
-            "num_decoding_samples": self.num_decoding_samples,
-        }
 
 @dataclass
-class TestParams:
-    # data
-    batch_size: int
-    dataset_size: int = None
-    # safe results
-    render: bool = True
-    dataset_path: str = None
-    # decoding
-    tanh_clipping: float = 10.0
-    top_p: float = 1
-    temperature: float = 1
-    decode_type: Literal["greedy", "sampling"] = "sampling"
-    num_decoding_samples: int = 100
-
-    data_dir: str = None
-    data_file: str = None
+class TestParams(PhaseParams):
+    devices: Union[str, List[int]] = "auto"
     checkpoint: str = None
     seed: int = 1234567
-
     gurobi_timeout: int = 3600
-
-    @property
-    def decoding(self) -> dict:
-        return {
-            "decoding_strategy": self.decode_type,
-            "tanh_clipping": self.tanh_clipping,
-            "top_p": self.top_p,
-            "temperature": self.temperature,
-            "num_decoding_samples": self.num_decoding_samples,
-        }

@@ -39,8 +39,8 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
         shelf_mask = env.get_node_mask(state)
         attn_mask = self._get_attn_mask(shelf_mask, state)
         shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
-        shelf_logp, step_mask = self._logits_to_logp(shelf_logits, shelf_mask)
-        next_shelves, shelf_logps = self.dec_strategy.step(shelf_logp, step_mask, state, key="shelf")
+        shelf_logp = self._logits_to_logp(shelf_logits, shelf_mask)
+        next_shelves, shelf_logps = self.dec_strategy.step(shelf_logp)
         shelf_action = self._translate_action(next_shelves, state, "shelf")
 
         # partial step through the environment to get intermediate state s'
@@ -49,8 +49,8 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
         sku_mask = env.get_sku_mask(intermediate_state, shelf_action)
         attn_mask = self._get_attn_mask(sku_mask, state)
         sku_logits = self.sku_pointer(embeddings, intermediate_state, attn_mask=attn_mask)
-        sku_logp, step_mask = self._logits_to_logp(sku_logits, sku_mask)
-        skus_to_pick, sku_logps = self.dec_strategy.step(sku_logp, step_mask, intermediate_state, key="sku")
+        sku_logp = self._logits_to_logp(sku_logits, sku_mask)
+        skus_to_pick, sku_logps = self.dec_strategy.step(sku_logp)
         skus_action = self._translate_action(skus_to_pick, state, "sku") 
 
         # step through environment with handled conflicts to get next state
@@ -89,9 +89,9 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
             attn_mask = None
         return attn_mask
 
-    def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
+    def get_logp_of_action(self, embeddings, state: MSPRPState, actions: TensorDict, action_masks: TensorDict, env: MultiAgentEnv):
         state = state.clone()
-        masks = masks.clone()
+        masks = action_masks.clone()
         actions = actions.clone()
     
         shelf_action = actions["shelf"]
@@ -103,7 +103,7 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
             attn_mask = ~shelf_mask
 
         shelf_logits = self.shelf_pointer(embeddings, state, attn_mask=attn_mask)
-        shelf_logp, _ = self._logits_to_logp(shelf_logits, shelf_mask)
+        shelf_logp = self._logits_to_logp(shelf_logits, shelf_mask)
         shelf_entropy = Categorical(probs=shelf_logp.exp()).entropy().unsqueeze(-1)
         selected_shelf_logp = shelf_logp.gather(1, shelf_action["idx"])
 
@@ -121,7 +121,7 @@ class HierarchicalSingleAgentDecoder(BaseDecoder):
             attn_mask = ~sku_mask
 
         sku_logits = self.sku_pointer(embeddings, state, attn_mask=attn_mask)
-        sku_logp, _ = self._logits_to_logp(sku_logits, sku_mask)
+        sku_logp = self._logits_to_logp(sku_logits, sku_mask)
         sku_entropy = Categorical(probs=sku_logp.exp()).entropy().unsqueeze(-1)
         selected_sku_logp = sku_logp.gather(1, sku_action["idx"])
 
