@@ -208,7 +208,7 @@ def get_file_dataloader(env, batch_size: int, file_dirs: Union[list, str] = None
 
 
 def read_icaps_instances(path, num_agents):
-    td = torch.load(path)
+    td = torch.load(path, weights_only=False)
     bs = td.batch_size
     # NOTE below code does not work since num_agents in instances is fixed to 1 (e.g. through current_lcation)
     if num_agents is None:

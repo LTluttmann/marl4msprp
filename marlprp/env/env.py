@@ -7,9 +7,9 @@ from tensordict import TensorDict
 
 from marlprp.utils.utils import Registry
 from marlprp.env.instance import MSPRPState
-from marlprp.utils.ops import gather_by_index
 from marlprp.env.generator import MSPRPGenerator
 from marlprp.utils.config import EnvParams, EnvParamList
+from marlprp.utils.ops import gather_by_index, augment_xy_data_by_8_fold
 
 
 env_registry = Registry()
@@ -299,6 +299,24 @@ class MultiAgentEnv:
         reward = -distance + self.params.packing_ratio_penalty * entropy
 
         return reward
+
+
+    @staticmethod
+    def augment_states(trajectories_or_state: Union[MSPRPState, TensorDict], *args, **kwargs):
+        if isinstance(trajectories_or_state, TensorDict):
+            state = trajectories_or_state.get("state")
+            aug_locs = augment_xy_data_by_8_fold(state.coordinates)
+            trajectories_aug = trajectories_or_state.repeat(8)
+            trajectories_aug["state"].coordinates = aug_locs
+            return trajectories_aug
+        elif isinstance(trajectories_or_state, MSPRPState):
+            state = trajectories_or_state
+            aug_locs = augment_xy_data_by_8_fold(state.coordinates)
+            state_aug = state.repeat(8)
+            state_aug.coordinates = aug_locs
+            return state_aug
+        else:
+            raise ValueError("Input must be of type TensorDict or MSPRPState")
 
 
 

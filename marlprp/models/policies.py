@@ -23,6 +23,7 @@ class RoutingPolicy(nn.Module):
 
     def __init__(self, params: PolicyParams):
         super().__init__()  
+        self.params = params
         self.encoder: nn.Module = ...
         self.decoder: BaseDecoder = ...
         self.critic = None

@@ -116,13 +116,13 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
     @torch.no_grad
     def _collect_experience(self, next_state: MSPRPState, instance_id: str):
         # init storage and perform rollout
-        state_stack = LazyTensorStorage(self.env.max_num_steps, device=self.model_params.buffer_storage_device)
-        done_states, rewards, state_stack = self.ref_policy(next_state, self.env, storage=state_stack)
+        experience_buffer = LazyTensorStorage(self.env.max_num_steps, device=self.model_params.buffer_storage_device)
+        done_states, rewards, experience_buffer = self.ref_policy(next_state, self.env, storage=experience_buffer)
         # (bs, #samples, #steps)
-        state_stack = unbatchify(state_stack, self.num_starts)
+        experience_buffer = unbatchify(experience_buffer, self.num_starts)
         # (bs, #samples)
-        rewards = unbatchify(rewards, self.num_starts).to(state_stack.device)
-        steps = (~state_stack["state"].done).sum(-1).to(_float)
+        rewards = unbatchify(rewards, self.num_starts).to(experience_buffer.device)
+        steps = (~experience_buffer["state"].done).sum(-1).to(_float)
         # (bs); add step penalty and very small noise to randomize tie breaks
         best_idx = torch.argmax(rewards - self.penalty_coef * steps + torch.rand_like(rewards) * 1e-9, dim=1)
         best_reward = gather_by_index(rewards, best_idx)
@@ -133,25 +133,25 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         self.avg_steps.append(steps.mean())
 
         # (bs)
-        best_states = gather_by_index(state_stack, best_idx, dim=1)
+        best_trajectories = gather_by_index(experience_buffer, best_idx, dim=1)
 
         if self.model_params.use_advantage_weights:
             advantage = best_reward - rewards.mean(1, keepdim=False)
             adv_weights = calc_adv_weights(advantage, temp=2.5, weight_clip=10.)
-            best_states["adv_weights"] = adv_weights.unsqueeze(1).expand(*best_states.shape)
+            best_trajectories["adv_weights"] = adv_weights.unsqueeze(1).expand(*best_trajectories.shape)
 
         # flatten so that every step is an experience
-        best_states = best_states.reshape(-1).contiguous()
+        best_trajectories = best_trajectories.reshape(-1).contiguous()
         # filter out steps where the instance is already in terminal state. There is nothing to learn from
-        best_states = best_states[~best_states["state"].done]
-        if not self.model_params.eval_multistep and self.ref_policy.ma_policy:
+        best_trajectories = best_trajectories[~best_trajectories["state"].done]
+        if not self.model_params.eval_multistep and self.ref_policy.params.is_multiagent_policy:
             # if we have a multi-agent policy (generating M action per step) but want to train the model only
             # on a single action, we need to flatten the agent index in the batch dimension 
-            best_states = self.flatten_multi_action_td(best_states)
+            best_trajectories = self.flatten_multi_action_td(best_trajectories)
         if hasattr(self.env, "augment_states"):
-            best_states = self.env.augment_states(best_states)
+            best_trajectories = self.env.augment_states(best_trajectories)
         # save to buffer
-        self.rbs[instance_id].extend(best_states)
+        self.rbs[instance_id].extend(best_trajectories)
 
 
     def training_step(self, batch: TensorDict, batch_idx: int):

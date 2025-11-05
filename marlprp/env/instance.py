@@ -16,6 +16,7 @@ class MSPRPState:
     remaining_capacity: torch.Tensor = None
     active_agent: torch.Tensor = None
     done: torch.Tensor = None
+    start_nodes: torch.Tensor = None
 
     @classmethod
     def initialize(
@@ -76,8 +77,9 @@ class MSPRPState:
         if self.done is None:
             self.done = (self.demand.le(1e-5).all(-1) & self.agent_at_depot().all(-1))
 
-        self.start_nodes = self.current_location.clone()
-        
+        if self.start_nodes is None:
+            self.start_nodes = self.current_location.clone()
+
     @property
     def capacity(self):
         return self.init_capacity.max().item()
