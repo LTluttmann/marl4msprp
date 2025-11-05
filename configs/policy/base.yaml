@@ -6,7 +6,7 @@ input_dropout: 0.0
 activation: "gelu"
 norm_first: false
 scale_supply_by_demand: false
-bias: false
+bias: true
 mask_no_edge: true
 use_rezero: false
 param_sharing: true

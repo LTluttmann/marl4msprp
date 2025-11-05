@@ -12,7 +12,7 @@ class TransformerParams(PolicyParams):
     activation: str = "gelu"
     norm_first: bool = False # True
     scale_supply_by_demand: bool = True
-    bias: bool = False
+    bias: bool = True
     ms_hidden_dim: int = None
     mask_no_edge: bool = True
     decoder_attn_mask: bool = False
@@ -23,6 +23,7 @@ class TransformerParams(PolicyParams):
     ms_scores_softmax_temp: float = 1.0
     ms_scores_tanh_clip: float = 0.0
     ms_sparse_attn: bool = False
+    use_sku_attn: bool = True
 
     def __post_init__(self):
         super().__post_init__()

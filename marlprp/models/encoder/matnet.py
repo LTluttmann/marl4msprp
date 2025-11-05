@@ -13,11 +13,26 @@ from .base import BaseEncoder, MatNetEncoderOutput
 from .cross_attention import EfficientMixedScoreMultiHeadAttentionLayer, MixedScoreMultiHeadAttentionLayer
 
 
+class MockTransformer(nn.Module):
+    def __init__(self, params: TransformerParams) -> None:
+        super().__init__()
+        self.params = params
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(params.embed_dim),
+            nn.Linear(params.embed_dim, params.feed_forward_hidden),
+            nn.GELU(),
+            nn.Linear(params.feed_forward_hidden, params.embed_dim),
+        )
+
+    def forward(self, x, **kwargs):
+        return self.mlp(x)
+
+
 class MatNetEncoderLayer(nn.Module):
 
     def __init__(self, params: TransformerParams) -> None:
         super().__init__()
-
+        self.params = params
         self.norm_first = params.norm_first
 
         self.shelf_mha = TransformerEncoderLayer(
@@ -30,15 +45,20 @@ class MatNetEncoderLayer(nn.Module):
             batch_first=True,
         )
 
-        # self.sku_mha = TransformerEncoderLayer(
-        #     d_model=params.embed_dim,
-        #     nhead=params.num_heads,
-        #     dim_feedforward=params.feed_forward_hidden,
-        #     dropout=params.dropout,
-        #     activation=params.activation,
-        #     norm_first=self.norm_first,
-        #     batch_first=True,
-        # )
+        if self.params.use_sku_attn:
+            self.sku_mha = TransformerEncoderLayer(
+                d_model=params.embed_dim,
+                nhead=params.num_heads,
+                dim_feedforward=params.feed_forward_hidden,
+                dropout=params.dropout,
+                activation=params.activation,
+                norm_first=params.norm_first,
+                batch_first=True,
+            )
+        else:
+            # only use transformer mlp for sku embeddings
+            self.sku_mha = MockTransformer(params)
+
 
         if params.param_sharing and params.ms_sparse_attn:
             self.cross_attn = EfficientSparseCrossAttention(params)
@@ -96,7 +116,7 @@ class MatNetEncoderLayer(nn.Module):
         shelf_emb_out = self.shelf_mha(shelf_emb_out, src_mask=shelf_mask)
 
         # (bs, num_ma, emb)
-        # sku_emb_out = self.sku_mha(sku_emb_out, src_mask=sku_mask)
+        sku_emb_out = self.sku_mha(sku_emb_out, src_mask=sku_mask)
 
 
         ###### FINAL NORMS ##########
@@ -140,6 +160,8 @@ class MatNetEncoder(BaseEncoder):
 
         # mask shelves that have no demanded items in stock
         shelf_mask = (state.demand.unsqueeze(1) * state.supply_w_depot).eq(0).all(-1)
+        # current locations of agents will also be used during self attention
+        shelf_mask = shelf_mask.scatter(1, state.current_location, False)
         shelf_mask[:, :state.num_depots] = False  # depots are never masked
         shelf_mask = shelf_mask.unsqueeze(1).repeat(1, state.num_shelves+state.num_depots, 1)
         shelf_mask = shelf_mask.diagonal_scatter(

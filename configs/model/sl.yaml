@@ -1,19 +1,19 @@
 # @package _global_
 model:
   algorithm: sl
-  inner_epochs: 5
+  inner_epochs: 7
     # - 5
     # - 12
     # - 1.05
   rollout_batch_size: 100
   mini_batch_size: 2000
-  num_starts: 100
+  num_starts: 128
   eval_per_agent: True
   eval_multistep: True
   listnet_alpha: 0.0
   lookback_intervals: 0
   always_clear_buffer: True
-  update_after_every_batch: True
+  update_after_every_batch: False
 
 
 train:

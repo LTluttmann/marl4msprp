@@ -101,11 +101,11 @@ class MahamAgentContext(MultiAgentContext):
         # bs, n_agents
         demand_agent_view = (remaining_demand / state.capacity).expand_as(state.remaining_capacity)
         # bs, n_sku
-        weights = state.demand / (remaining_demand + 1e-6)
-        # bs, 1, emb
-        weighted_avg = torch.sum(weights.unsqueeze(-1) * emb["sku"], dim=1, keepdim=True)
-        # bs, num_agents, emb
-        weighted_avg = weighted_avg.expand(-1, state.num_agents, -1)
+        # weights = state.demand / (remaining_demand + 1e-6)
+        # # bs, 1, emb
+        # weighted_avg = torch.sum(weights.unsqueeze(-1) * emb["sku"], dim=1, keepdim=True)
+        # # bs, num_agents, emb
+        # weighted_avg = weighted_avg.expand(-1, state.num_agents, -1)
         # bs, num_agents, emb
         demand_proj = self.problem_proj(demand_agent_view.unsqueeze(-1))
         return demand_proj # + weighted_avg
@@ -255,12 +255,14 @@ class CommunicationLayer(nn.Module):
 
     def forward(self, x, state: MSPRPState):
         #  bs, num_agents
-        pad_mask = state.agent_pad_mask
-        #  bs * num_heads, num_agents
-        attn_mask = state.remaining_capacity.eq(0).repeat_interleave(
-            self.num_heads, dim=0
+        # pad_mask = state.agent_pad_mask
+        # bs, num_agents, num_agents
+        attn_mask = state.remaining_capacity.eq(0).unsqueeze(1).repeat(1, state.num_agents, 1)
+        attn_mask = attn_mask.diagonal_scatter(
+            torch.full_like(state.current_location, fill_value=False),
+            dim1=1, dim2=2
         )
-        #  bs * num_heads, num_agents, num_agents
-        attn_mask = attn_mask.unsqueeze(1).expand((-1, state.num_agents, state.num_agents))
-        h = self.comm_layer(x, src_mask=attn_mask, src_key_padding_mask=pad_mask)
+        # add head dimension -> [bs * num_heads, num_agents, num_agents]
+        attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
+        h = self.comm_layer(x, src_mask=attn_mask) # , src_key_padding_mask=pad_mask)
         return h

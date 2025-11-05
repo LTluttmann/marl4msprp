@@ -93,7 +93,7 @@ class BaseEnvParams:
     avg_loc_per_sku: int = None
     num_storage_locations: Optional[int] = 20
 
-    min_demand: int = 0
+    min_demand: int = 1
     max_demand: int = 4
     min_supply: int = 1
     max_supply: int = None # will be calculated 
