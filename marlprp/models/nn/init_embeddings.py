@@ -22,13 +22,18 @@ def get_init_emb_layer(params: PolicyParams):
 
 
 class MultiAgentInitEmbedding(nn.Module):
-    def __init__(self, policy_params: TransformerParams):
+    def __init__(self, params: TransformerParams):
         super(MultiAgentInitEmbedding, self).__init__()
-        self.embed_dim = policy_params.embed_dim
-        self.scale_supply_by_demand = policy_params.scale_supply_by_demand
-        self.depot_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
-        self.shelf_proj = nn.Linear(3, policy_params.embed_dim, bias=False)
-        self.sku_proj = nn.Linear(2, policy_params.embed_dim, bias=False)
+        self.params = params
+        self.embed_dim = params.embed_dim
+        self.scale_supply_by_demand = params.scale_supply_by_demand
+        self.depot_proj = nn.Linear(2, params.embed_dim, bias=params.bias)
+        self.sku_proj = nn.Linear(2, params.embed_dim, bias=params.bias)
+        if params.env.use_stay_token:
+            # additional bias term for shelves where agents can wait (CAD)
+            self.shelf_proj = nn.Linear(5, params.embed_dim, bias=params.bias)
+        else:
+            self.shelf_proj = nn.Linear(4, params.embed_dim, bias=params.bias)
 
     def _init_depot_embed(self, state: MSPRPState):
         depot_coordinates = state.coordinates[:, :state.num_depots]
@@ -41,17 +46,24 @@ class MultiAgentInitEmbedding(nn.Module):
         return self.depot_proj(feats)
     
     def _init_shelf_embed(self, state: MSPRPState):
-        num_skus = state.num_skus
+        num_skus = state.demand.gt(0).sum(-1).clamp_min(1)
         shelf_coordinates = state.coordinates[:, state.num_depots:]
-        num_stored_skus = state.supply.gt(0).sum(-1)
-        mean_supply = state.supply.sum(-1) / (num_stored_skus + 1e-6)
-        feats = torch.stack([
+        percentage_stored_per_sku = (state.demand.unsqueeze(1).clamp_max(1) * state.supply) / state.demand.unsqueeze(1).clamp_min(1)
+        num_stored_skus = percentage_stored_per_sku.gt(0).sum(-1)
+        mean_perc_supply = percentage_stored_per_sku.clamp_max(1).sum(-1) / num_skus.unsqueeze(1)
+    
+        feats = [
             shelf_coordinates[..., 0],
             shelf_coordinates[..., 1],
-            num_stored_skus / num_skus,
-            # mean_supply / state.capacity,
-        ], dim=-1)
-        return self.shelf_proj(feats)
+            num_stored_skus / num_skus.unsqueeze(1),
+            mean_perc_supply
+        ]
+
+        if self.params.env.use_stay_token:
+            # shelf has no demand but some agents are currently there and may wait there
+            is_cad_shelf = state.current_loc_ohe[..., state.num_depots:].sum(1).clamp_max(1) & num_stored_skus.eq(0)
+            feats.append(is_cad_shelf.float())
+        return self.shelf_proj(torch.stack(feats, dim=-1))
 
     def _init_sku_embed(self, state: MSPRPState):
         demand_scaled = state.demand.clone() / state.capacity
@@ -90,7 +102,7 @@ class EquityTransformerInitEmbedding(MultiAgentInitEmbedding):
     def __init__(self, policy_params: TransformerParams):
         super(EquityTransformerInitEmbedding, self).__init__(policy_params)
         self.pe = PositionalEncoding(embed_dim=policy_params.embed_dim)
-        self.agent_proj = nn.Linear(1, policy_params.embed_dim, bias=False)
+        self.agent_proj = nn.Linear(1, policy_params.embed_dim, bias=policy_params.bias)
 
     def _init_agent_embed(self, tc: MSPRPState, depot_emb): 
         bs, num_agents = tc.remaining_capacity.shape
