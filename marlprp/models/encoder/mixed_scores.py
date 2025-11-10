@@ -109,7 +109,8 @@ class MixedScoreFF(nn.Module):
                 return ms1, ms2
             else:
                 return ms1, ms2.transpose(-2, -1).contiguous()
-        
+        else:
+            scores = rearrange(scores, "b ... h -> b h ...")
         return scores
 
         

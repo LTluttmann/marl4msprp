@@ -432,7 +432,7 @@ class AlterParamOnPlateau:
 
         if self.num_bad_epochs > self.patience:
             # Apply multiplicative change directly to the live parameter
-            self.parameter.val = self.parameter.val * self.factor
+            self.parameter.val = self.parameter._val * self.factor
             # Next NumericParameter.update() will use this as the new anchor
             self.cooldown_counter = self.cooldown
             self.num_bad_epochs = 0

@@ -26,6 +26,7 @@ model:
     40s-15i-100p: 200
     40s-20i-100p: 100
     40s-30i-100p: 50
+    50s-100i-500p: 10
   mini_batch_size: 2000
   num_starts: 120
   eval_per_agent: True
