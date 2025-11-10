@@ -432,9 +432,7 @@ class AlterParamOnPlateau:
 
         if self.num_bad_epochs > self.patience:
             # Apply multiplicative change directly to the live parameter
-            new_val = self.parameter.val * self.factor
-            # Clamp to avoid hitting 0/negative (important for exponential)
-            self.parameter.val = max(float(new_val), self.eps)
+            self.parameter.val = self.parameter.val * self.factor
             # Next NumericParameter.update() will use this as the new anchor
             self.cooldown_counter = self.cooldown
             self.num_bad_epochs = 0
@@ -506,4 +504,4 @@ class NumericParameter:
         if (metric is not None) and (self.plateau_scheduler is not None):
             self.plateau_scheduler.step(metric)
 
-        return self.val
+        return self
