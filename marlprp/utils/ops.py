@@ -82,22 +82,22 @@ def batchify(
         x = _batchify_single(x, s) if s > 0 else x
     return x
 
-def augment_or_batchify(td: TensorDict, env, num_samples: DecodingConfig):
+def augment_or_batchify(td: TensorDict, env, cfg: DecodingConfig):
     bs = td.size(0)
-    num_augment = num_samples.num_augment
+    num_augment = cfg.num_augment
     if num_augment > 1:
         assert hasattr(env, "augment_states")
         td = env.augment_states(td, num_augment=num_augment)
         assert td.size(0) // bs == num_augment, f"Augmentation failed. Expected {num_augment} augmentations, got {td.size(0) // bs}"
 
-    num_strategies = num_samples.num_strategies
+    num_strategies = cfg.num_strategies
     if num_strategies > 1: 
         bs = td.size(0)
         strategy_id = torch.arange(num_strategies, device=td.device).repeat_interleave(bs)
         td = td.repeat(num_strategies)
         td["strategy_id"] = strategy_id
         
-    num_starts = num_samples.num_starts
+    num_starts = cfg.num_starts
     if num_starts > 1:
         # Expand td to batch_size * num_starts
         td = batchify(td, num_starts)

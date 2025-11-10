@@ -30,7 +30,7 @@ class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
         self.out_proj2 = nn.Linear(embed_dim, embed_dim, bias=model_params.bias)
 
 
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor, attn_mask: torch.Tensor = None, cost_mat: torch.Tensor = None):
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, cost_mat: torch.Tensor, attn_mask: torch.Tensor = None):
         batch_size = x1.size(0)
         row_cnt = x1.size(-2)
         col_cnt = x2.size(-2)
@@ -47,27 +47,28 @@ class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
 
         # shape: (batch, num_heads, row_cnt, col_cnt)
         logits = self.norm_factor * torch.matmul(q, k.transpose(-2, -1))
-        
-        if cost_mat is not None:
-            # shape: (batch, num_heads, row_cnt, col_cnt)
-            cost_mat_score = (
-                cost_mat.view(batch_size, 1, row_cnt, col_cnt)
-                .expand(batch_size, self.num_heads, row_cnt, col_cnt)
-                .contiguous()
-            )
-            logits = self.mixed_scores_layer(logits, cost_mat_score)
+        del q,k
+
+        # shape: (batch, num_heads, row_cnt, col_cnt)
+        cost_mat = (
+            cost_mat.view(batch_size, 1, row_cnt, col_cnt)
+            .expand(batch_size, self.num_heads, row_cnt, col_cnt)
+            .contiguous()
+        )
+        l1, l2 = self.mixed_scores_layer(logits, cost_mat)
+        del logits
 
         if attn_mask is not None:
-            mask1 = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(logits).contiguous()
+            mask1 = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(l1).contiguous()
             mask2 = mask1.clone().transpose(-2, -1)
         else:
             mask1, mask2 = None, None
 
         h1 = self.out_proj1(
-            apply_weights_and_combine(logits, v2, mask=mask1, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
+            apply_weights_and_combine(l1, v2, mask=mask1, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
         )
         h2 = self.out_proj2(
-            apply_weights_and_combine(logits.transpose(-2, -1), v1, mask=mask2, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
+            apply_weights_and_combine(l2, v1, mask=mask2, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
         )
 
         return h1, h2
@@ -96,7 +97,7 @@ class MixedScoreMultiHeadAttention(nn.Module):
         self.mixed_scores_layer = MixedScoreFF(model_params)
 
 
-    def forward(self, row_emb: torch.Tensor, col_emb: torch.Tensor, cost_mat: torch.Tensor = None, attn_mask: torch.Tensor = None):
+    def forward(self, row_emb: torch.Tensor, col_emb: torch.Tensor, cost_mat: torch.Tensor, attn_mask: torch.Tensor = None):
 
         # q shape: (batch, head_num, row_cnt, qkv_dim)
         q = rearrange(self.Wq(row_emb), "b s (h d) -> b h s d", h=self.num_heads)
@@ -110,15 +111,14 @@ class MixedScoreMultiHeadAttention(nn.Module):
 
         # shape: (batch, head_num, row_cnt, col_cnt)
         logits = self.norm_factor * torch.matmul(q, k.transpose(2, 3))
-        
-        if cost_mat is not None:
-            # shape: (batch, num_heads, row_cnt, col_cnt)
-            cost_mat_score = (
-                cost_mat.unsqueeze(1)
-                .expand(batch_size, self.num_heads, row_cnt, col_cnt)
-                .contiguous()
-            )
-            logits = self.mixed_scores_layer(logits, cost_mat_score)
+        del q,k
+        # shape: (batch, num_heads, row_cnt, col_cnt)
+        cost_mat = (
+            cost_mat.unsqueeze(1)
+            .expand(batch_size, self.num_heads, row_cnt, col_cnt)
+            .contiguous()
+        )
+        logits = self.mixed_scores_layer(logits, cost_mat)
 
         if attn_mask is not None:
             attn_mask = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(logits).contiguous()

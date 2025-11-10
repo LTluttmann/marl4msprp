@@ -4,7 +4,7 @@ datasets/*
 __pycache__/
 *.py[cod]
 *$py.class
-
+.history
 dataset.pth
 greedy.pth
 solution*.pth

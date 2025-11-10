@@ -9,7 +9,7 @@ from marlprp.env.instance import MSPRPState
 from marlprp.models.nn.kvl import get_kvl_emb
 from marlprp.models.decoder.base import BasePointer
 from marlprp.models.nn.context import get_context_emb
-from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput
 from marlprp.models.policy_args import TransformerParams, MahamParams
 
 

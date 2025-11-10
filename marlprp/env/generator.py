@@ -37,6 +37,11 @@ class MSPRPGenerator:
             self.max_supply = instance_params.max_supply
 
         self._num_agents = instance_params.num_agents
+        if instance_params.fix_max_num_agents and self._num_agents is None:
+            self._max_num_agents = self.max_demand * self.num_skus // instance_params.capacity + 1
+        else:
+            self._max_num_agents = None
+        # define an id for reference
         self.id = f"{self.num_shelves}s-{self.num_skus}i-{self.num_storage_locations}p"
 
     @property
@@ -90,7 +95,7 @@ class MSPRPGenerator:
 
         if self._num_agents is None:
             num_agents = torch.ceil(demand.sum(-1, keepdim=True) / self.capacity)
-            max_num_agents = int(num_agents.max().item())
+            max_num_agents = self._max_num_agents or int(num_agents.max().item())
             agent_pad_mask = num_agents < torch.arange(1, max_num_agents+1).view(1, -1).expand(*bs, max_num_agents)
             num_agents = max_num_agents
         else:

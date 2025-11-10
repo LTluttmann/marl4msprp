@@ -29,6 +29,8 @@ class MultiAgentInitEmbedding(nn.Module):
         self.scale_supply_by_demand = params.scale_supply_by_demand
         self.depot_proj = nn.Linear(2, params.embed_dim, bias=params.bias)
         self.sku_proj = nn.Linear(2, params.embed_dim, bias=params.bias)
+        self.sku_dropout = nn.Dropout(p=params.input_dropout)
+        self.node_dropout = nn.Dropout(p=params.input_dropout)
         if params.env.use_stay_token:
             # additional bias term for shelves where agents can wait (CAD)
             self.shelf_proj = nn.Linear(5, params.embed_dim, bias=params.bias)
@@ -74,7 +76,9 @@ class MultiAgentInitEmbedding(nn.Module):
             num_storage_loc / state.num_shelves
         ], dim=-1)
     
-        return self.sku_proj(feats)
+        sku_emb = self.sku_proj(feats)
+        sku_emb = self.sku_dropout(sku_emb)
+        return sku_emb
     
     def _init_edge_embed(self, state: MSPRPState):
         if self.scale_supply_by_demand:
@@ -92,8 +96,8 @@ class MultiAgentInitEmbedding(nn.Module):
         shelf_emb = self._init_shelf_embed(tc)
         sku_emb = self._init_sku_embed(tc)
         edge_emb = self._init_edge_embed(tc)
-
         node_emb = torch.cat((depot_emb, shelf_emb), dim=1)
+        node_emb = self.node_dropout(node_emb)
         return node_emb, sku_emb, edge_emb
 
 

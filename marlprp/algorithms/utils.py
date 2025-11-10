@@ -1,9 +1,11 @@
+import math
 import torch
 import numpy as np
 
+from torch import inf
 from functools import lru_cache
-from dataclasses import dataclass
-from typing import Optional, Callable, Union, Type, List
+from dataclasses import dataclass, field
+from typing import Optional, Callable, Union, Type, List, Literal, Dict
 
 from torchrl.data.replay_buffers import (
     LazyMemmapStorage,
@@ -49,33 +51,6 @@ def make_replay_buffer(
         )
 
     return rb
-
-
-# def one_sided_independent_t_test(candidate_rewards, ref_rewards):
-#     # Step 1: gather first and second order statistics
-#     a_mean = torch.mean(candidate_rewards).item()
-#     a_var = torch.var(candidate_rewards, unbiased=True)  # unbiased for sample var
-
-#     b_mean = torch.mean(ref_rewards).item()
-#     b_var = torch.var(ref_rewards, unbiased=True) # unbiased for sample var
-
-#     # Step 2: Calculate the t-statistic for a one-sample t-test
-#     # 2.1 determine degrees of freedom
-#     na = candidate_rewards.size(0)
-#     nb = ref_rewards.size(0)
-#     df = na + nb - 2
-#     # 2.2 numerator
-#     dm = a_mean - b_mean
-#     # 2.3 pooled variance and denominator
-#     pooled_v = (((na-1) * a_var) + ((nb-1) * b_var)) / df
-#     denom = torch.sqrt(pooled_v) * math.sqrt(1/na + 1/nb)
-#     # t-statistic formula
-#     t_stat = dm / denom
-
-#     # Step 3: determine p value
-#     cdf = stats.t.cdf(t_stat.cpu().numpy(), df=df)
-#     p_value = 1 - cdf
-#     return p_value
 
 
 class RewardScaler:
@@ -124,37 +99,6 @@ class RewardScaler:
         delta2 = batch - self.mean
         self.M2 += (delta * delta2).sum()
 
-
-
-@dataclass
-class NumericParameter:
-    _val: Numeric
-    update_coef: Optional[float] = None
-    min: Optional[Numeric] = None
-    max: Optional[Numeric] = None
-    dtype: Type | Callable = None
-
-    def __post_init__(self):
-        self.min = self.min or float("-inf")
-        self.max = self.max or float("inf")
-
-    @property
-    def val(self):
-        if self._val is None:
-            return None
-        val = min(max(self._val, self.min), self.max)
-        if self.dtype is not None:
-            val = self.dtype(val)
-        return val
-    
-    @val.setter
-    def val(self, value):
-        self._val = value
-
-    def update(self):
-        if self.update_coef is not None:
-            self.val = self._val * self.update_coef
-        return self
 
 
 class GradNormAccumulator:
@@ -344,3 +288,222 @@ def get_grad_norm(model):
             total_norm += param_norm.item() ** 2
     total_norm = total_norm ** 0.5
     return total_norm
+
+
+
+
+
+# ----------------------------
+# Stateful, current-aware schedulers
+# ----------------------------
+
+class BaseScheduler:
+    def __init__(self, parameter: "NumericParameter", total_steps: int):
+        self.param = parameter
+        self.start = float(self.param.start)
+        self.end = float(self.param.end)  # relies on NumericParameter writing end back
+        self.total_steps = max(1, int(total_steps))
+        self.step_count = 0  # how many updates have been performed
+
+    @property
+    def remaining(self) -> int:
+        # Remaining steps including the upcoming one; avoid zero
+        return max(self.total_steps - self.step_count, 1)
+
+    def step(self) -> float:
+        raise NotImplementedError
+
+
+class ExponentialScheduler(BaseScheduler):
+    def step(self) -> float:
+        c = float(self.param.val)
+        self.step_count += 1
+        R = self.remaining
+
+        # Robustness: if values are nonpositive, fall back to linear one-step move
+        if c > 0.0 and self.end > 0.0:
+            gamma = (self.end / c) ** (1.0 / R)
+            self.param.val = c * gamma
+        else:
+            self.param.val = c + (self.end - c) / R
+        return self.param.val
+
+
+class LinearScheduler(BaseScheduler):
+    def step(self) -> float:
+        c = float(self.param.val)
+        self.step_count += 1
+        R = self.remaining
+        self.param.val = c + (self.end - c) / R
+        return self.param.val
+
+
+class CosineScheduler(BaseScheduler):
+    def step(self) -> float:
+        c = float(self.param.val)
+        self.step_count += 1
+        R = self.remaining
+        # Treat `c` as the start of a fresh cosine to `end` over R steps
+        self.param.val = self.end + 0.5 * (c - self.end) * (1.0 + math.cos(math.pi / R))
+        return self.param.val
+
+
+class ConstantScheduler(BaseScheduler):
+    def step(self) -> float:
+        # No change, but keep counters consistent
+        self.step_count += 1
+        self.param.val = float(self.param.val)
+        return self.param.val
+
+
+SCHEDULER_REGISTRY: Dict[str, Callable[["NumericParameter", int], BaseScheduler]] = {
+    "exponential": ExponentialScheduler,
+    "linear": LinearScheduler,
+    "cosine": CosineScheduler,
+    "constant": ConstantScheduler,
+}
+
+
+# ----------------------------
+# AlterParamOnPlateau
+# ----------------------------
+
+class AlterParamOnPlateau:
+    def __init__(
+        self,
+        parameter: "NumericParameter",
+        mode: Literal["min", "max"] = "min",
+        factor: float = 0.1,
+        patience: int = 10,
+        threshold: float = 1e-4,
+        threshold_mode: Literal["rel", "abs"] = "rel",
+        cooldown: int = 0,
+    ):
+        self.factor = factor
+        self.parameter = parameter
+        self.is_increasing = self.factor > 1
+        self.patience = patience
+        self.cooldown = cooldown
+
+        self._init_is_better(mode=mode, threshold=threshold, threshold_mode=threshold_mode)
+        self._reset()
+
+    def _reset(self):
+        self.best = self.mode_worse
+        self.cooldown_counter = 0
+        self.num_bad_epochs = 0
+
+    def _init_is_better(self, mode, threshold, threshold_mode):
+        if mode not in {"min", "max"}:
+            raise ValueError("mode " + mode + " is unknown!")
+        if threshold_mode not in {"rel", "abs"}:
+            raise ValueError("threshold mode " + threshold_mode + " is unknown!")
+        self.mode_worse = inf if mode == "min" else -inf
+        self.mode = mode
+        self.threshold = threshold
+        self.threshold_mode = threshold_mode
+
+    def is_better(self, a, best):
+        if self.mode == "min" and self.threshold_mode == "rel":
+            return a < best * (1.0 - self.threshold)
+        elif self.mode == "min" and self.threshold_mode == "abs":
+            return a < best - self.threshold
+        elif self.mode == "max" and self.threshold_mode == "rel":
+            return a > best * (1.0 + self.threshold)
+        else:  # mode == 'max' and epsilon_mode == 'abs'
+            return a > best + self.threshold
+
+    @property
+    def in_cooldown(self):
+        return self.cooldown_counter > 0
+
+    def step(self, metrics: float) -> None:
+        current = float(metrics)
+
+        if self.is_better(current, self.best):
+            self.best = current
+            self.num_bad_epochs = 0
+        else:
+            self.num_bad_epochs += 1
+
+        if self.in_cooldown:
+            self.cooldown_counter -= 1
+            self.num_bad_epochs = 0
+
+        if self.num_bad_epochs > self.patience:
+            # Apply multiplicative change directly to the live parameter
+            new_val = self.parameter.val * self.factor
+            # Clamp to avoid hitting 0/negative (important for exponential)
+            self.parameter.val = max(float(new_val), self.eps)
+            # Next NumericParameter.update() will use this as the new anchor
+            self.cooldown_counter = self.cooldown
+            self.num_bad_epochs = 0
+
+
+# ----------------------------
+# NumericParameter
+# ----------------------------
+
+@dataclass
+class NumericParameter:
+    start: Numeric
+    end: Optional[Numeric] = None
+    total_steps: Optional[int] = None
+    scheduler_name: Optional[str] = "linear"
+    dtype: Optional[Union[Type, Callable]] = None
+    patience: Optional[int] = None
+    plateau_factor: Optional[float] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+    scheduler: Optional[BaseScheduler] = field(default=None, init=False)
+    _val: float = field(default=None, init=False)
+    plateau_scheduler: Optional[AlterParamOnPlateau] = field(default=None, init=False)
+
+    def __post_init__(self):
+        if self.end is None:
+            self.scheduler = None
+        else:
+            total_steps = int(self.total_steps if self.total_steps is not None else 1)
+            if self.scheduler_name not in SCHEDULER_REGISTRY:
+                raise ValueError(
+                    f"Unknown scheduler '{self.scheduler_name}'. "
+                    f"Available: {list(SCHEDULER_REGISTRY)}"
+                )
+            self.scheduler = SCHEDULER_REGISTRY[self.scheduler_name](self, total_steps)
+
+        # Initialize value
+        self._val = float(self.start)
+        self.min = self.min or -inf
+        self.max = self.max or inf
+        # Optional plateau controller
+        if self.patience is not None:
+            assert self.plateau_factor is not None, "plateau_factor must be set when patience is provided."
+            self.plateau_scheduler = AlterParamOnPlateau(
+                self, mode="max", factor=self.plateau_factor, patience=self.patience
+            )
+
+    @property
+    def val(self) -> Numeric:
+        val = self._val
+        if self.dtype is not None:
+            val = self.dtype(val)
+        return min(max(val, self.min), self.max)
+
+    @val.setter
+    def val(self, value: Numeric):
+        self._val = float(value)
+
+    def update(self, metric: Optional[float] = None) -> float:
+        """
+        Advance one step; compute next value from the current one.
+        Note: scheduler is applied first, then plateau (so a plateau change
+        anchors the *next* step). Swap order if you want it to affect the
+        *same* step.
+        """
+        if self.scheduler is not None:
+            self.scheduler.step()
+        if (metric is not None) and (self.plateau_scheduler is not None):
+            self.plateau_scheduler.step(metric)
+
+        return self.val

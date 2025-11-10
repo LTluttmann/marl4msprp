@@ -33,7 +33,7 @@ train:
 
 val:
   dataset_size: 10000
-  batch_size: 1000
+  batch_size: 2000
   decode_type: greedy
 
 test:

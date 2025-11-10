@@ -1,41 +1,31 @@
 # @package _global_
 model:
   algorithm: sl
-  inner_epochs: 7
-    # - 5
-    # - 12
-    # - 1.05
-  rollout_batch_size: 100
+  inner_epochs: #  5
+    start: 6
+    max: 10
+    patience: 2
+    plateau_factor: 1.2
+
   mini_batch_size: 2000
   num_starts: 128
   eval_per_agent: True
   eval_multistep: True
-  listnet_alpha: 0.0
   lookback_intervals: 0
   always_clear_buffer: True
   update_after_every_batch: False
+  loss: listnet #ce
+  penalty_coef:
+    start: 0.001
+    end: 0.00001
+    total_steps: ${train.epochs}
+    scheduler_name: exponential
+  entropy_coef: 
+    start: 0.0001
+    end: 0.00001
+    total_steps: ${train.epochs}
 
 
 train:
-  batch_size: 1000
-  dataset_size: 4000
-
-# callbacks:
-
-#   lr_warmup_callback:
-#     _target_: marlprp.utils.callbacks.LearningRateWarmupCallback
-#     warmup_steps: 10
-#     initial_lr: 1e-7
-    
-  # validation_scheduler:
-  #   _target_: marlprp.utils.callbacks.ValidationScheduler
-  #   warmup_epochs_n: 1
-  #   reset_policy_after_warmup: false
-
-  # batch_size_finder:
-  #   _target_: marlprp.utils.callbacks.RolloutBatchSizeFinder
-  #   mode: "power"
-  #   steps_per_trial: 1
-  #   init_val: 2
-  #   max_trials: 25
-  #   batch_arg_name: train_batch_size
+  batch_size: 2000
+  dataset_size: 2000

@@ -67,6 +67,8 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.always_clear_buffer = True
         else:
             self.always_clear_buffer = model_params.always_clear_buffer
+        # if we do not set a fixed number of agents, we need to reinitialize the rb storage to avoid shape issues
+        self.reinitialize_rb_storage = self.env.params.num_agents is None
 
     def _update_rb_sampler_probs(self):
         if len(self.rb_ensamble.storage) == 1:
@@ -110,7 +112,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
         entropy = torch.stack(entropies, dim=0).mean()
         self.log("train/entropy", entropy, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         if self.always_clear_buffer:
-            self.clear_buffer()
+            self.clear_buffer(reinitialize=self.reinitialize_rb_storage)
 
 
     @torch.no_grad
@@ -270,7 +272,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.ref_policy.load_state_dict(copy.deepcopy(self.policy.state_dict()))
 
             if not self.always_clear_buffer:
-                self.clear_buffer()
+                self.clear_buffer(reinitialize=self.reinitialize_rb_storage)
 
         if (
             ((self.current_epoch + 1) % self.lookback_intervals == 0) and 

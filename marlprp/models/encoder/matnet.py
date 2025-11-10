@@ -9,23 +9,9 @@ from marlprp.models.policy_args import TransformerParams
 from marlprp.models.nn.init_embeddings import get_init_emb_layer
 
 from .sparse import EfficientSparseCrossAttention
-from .base import BaseEncoder, MatNetEncoderOutput
+from .utils import BaseEncoder, MatNetEncoderOutput, MockTransformer
 from .cross_attention import EfficientMixedScoreMultiHeadAttentionLayer, MixedScoreMultiHeadAttentionLayer
 
-
-class MockTransformer(nn.Module):
-    def __init__(self, params: TransformerParams) -> None:
-        super().__init__()
-        self.params = params
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(params.embed_dim),
-            nn.Linear(params.embed_dim, params.feed_forward_hidden),
-            nn.GELU(),
-            nn.Linear(params.feed_forward_hidden, params.embed_dim),
-        )
-
-    def forward(self, x, **kwargs):
-        return self.mlp(x)
 
 
 class MatNetEncoderLayer(nn.Module):
@@ -91,8 +77,8 @@ class MatNetEncoderLayer(nn.Module):
             shelf_emb_out, sku_emb_out = self.cross_attn(
                 self.shelf_norm(shelf_emb), 
                 self.sku_norm(sku_emb), 
+                cost_mat=cost_mat,
                 attn_mask=cross_mask, 
-                cost_mat=cost_mat
             )
             
             #### SKIP CONN AND NORM ####
@@ -103,8 +89,8 @@ class MatNetEncoderLayer(nn.Module):
             shelf_emb_out, sku_emb_out = self.cross_attn(
                 shelf_emb, 
                 sku_emb, 
+                cost_mat=cost_mat,
                 attn_mask=cross_mask, 
-                cost_mat=cost_mat
             )
             
             #### SKIP CONN AND NORM ####

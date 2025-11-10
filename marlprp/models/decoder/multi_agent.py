@@ -12,7 +12,7 @@ from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams, ParcoParams
 from marlprp.utils.ops import gather_by_index, batchify
-from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput
 from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
 from marlprp.utils.config import DecodingConfig
 from .base import BaseDecoder

@@ -4,7 +4,7 @@ import torch.nn as nn
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams
 from marlprp.models.nn.misc import PositionalEncoding
-from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput
 
 
 def get_kvl_emb(params: MahamParams, key: str = None) -> "ShelfKVL":

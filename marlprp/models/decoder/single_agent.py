@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import TransformerParams
-from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput
 
 from .base import BaseDecoder
 from .attn import AttentionPointer

@@ -25,7 +25,7 @@ from marlprp.utils.scheduler import create_scheduler
 from marlprp.utils.logger import get_lightning_logger
 from marlprp.utils.dataset import EnvLoader, get_file_dataloader
 from marlprp.utils.ops import all_gather_w_padding, all_gather_numeric
-from marlprp.algorithms.utils import NumericParameter, make_replay_buffer
+from marlprp.algorithms.utils import NumericParameter, make_replay_buffer, AlterParamOnPlateau
 from marlprp.algorithms.model_args import ModelParams, ModelWithReplayBufferParams
 from marlprp.utils.config import (
     EnvParams,
@@ -85,7 +85,7 @@ class LearningAlgorithm(LightningModule):
         self.best_rewards = {instance: float("-inf") for instance in self.instance_ids}
         self.best_avg_reward = float("-inf")
         self.test_set_names = None
-
+        self.max_mem = {'train': 0, 'val': 0, 'test': 0}
         if train_params is not None:
             self.training_mode = True
             self._init_for_training()
@@ -315,9 +315,9 @@ class LearningAlgorithm(LightningModule):
         else:
             return NumericParameter(param, dtype=dtype)
 
-    def _update_params(self):
+    def _update_params(self, metric):
         for name, param in self.param_container.items():
-            setattr(self, name, param.update())
+            setattr(self, name, param.update(metric))
     
     def _get_dataloader(self, params: Union[TrainingParams, ValidationParams, TestParams], dataset_dist = None):
 
@@ -397,26 +397,30 @@ class LearningAlgorithm(LightningModule):
     def on_train_epoch_start(self) -> None:
         self.train()
         self._setup_decode_type(self.train_params)
-
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
     def on_validation_epoch_start(self) -> None:
         self.eval()
         self._setup_decode_type(self.val_params)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
     
     def on_test_epoch_start(self) -> None:
         self.eval()
         self._setup_decode_type(self.test_params)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
-    # @monitor_lr_changes  # NOTE potential issues with multithreading
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             return
         
-        self._update_params()
         epoch_averages = self._get_global_validation_rewards()
         new_avg_reward = self.average_set_metric(epoch_averages)
 
         improved = False
+        self._update_params(new_avg_reward)
         if self.best_avg_reward < new_avg_reward:
             result_string = "\n".join([
                 f"{idx}: {round(-self.best_rewards[idx], 2)} -> {round(-reward, 2)}" 
@@ -440,6 +444,7 @@ class LearningAlgorithm(LightningModule):
         # clear cache
         gc.collect()
         torch.cuda.empty_cache()
+        self._log_gpu_memory('val')
         return epoch_averages, improved
 
     @property
@@ -487,6 +492,22 @@ class LearningAlgorithm(LightningModule):
         self.best_avg_reward = state_dict.pop("best_avg_reward", getattr(self, "best_avg_reward", None))
         super().load_state_dict(state_dict, *args, **kwargs)
 
+    def _log_gpu_memory(self, phase: str):
+        if torch.cuda.is_available():
+            mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            self.max_mem[phase] = mem_mb
+
+            # Log both to Lightning & W&B
+            self.log(f'max_gpu_mem_{phase}_MB', mem_mb, prog_bar=True, rank_zero_only=True)
+            if self.logger and hasattr(self.logger.experiment, "log"):
+                self.logger.experiment.log({f"max_gpu_mem_{phase}_MB": mem_mb})
+
+    def on_train_epoch_end(self):
+        self._log_gpu_memory('train')
+
+    def on_test_epoch_end(self):
+        self._log_gpu_memory('test')
+
 
 class ManualOptLearningAlgorithm(LearningAlgorithm):
     def __init__(
@@ -510,7 +531,6 @@ class ManualOptLearningAlgorithm(LearningAlgorithm):
 
         self.automatic_optimization = False
 
-    # @monitor_lr_changes
     def on_validation_epoch_end(self):
         # update learning rate schedulers
         scheduler = self.lr_schedulers()
@@ -577,7 +597,7 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         )
 
         self.model_params: ModelWithReplayBufferParams
-        self.inner_epochs = self.setup_parameter(model_params.inner_epochs)
+        self.inner_epochs = self.setup_parameter(model_params.inner_epochs, dtype=int)
 
         # setup reference policy
         self.ref_policy = copy.deepcopy(self.policy)
@@ -596,7 +616,7 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
 
         pin_memory = True if model_params.buffer_storage_device == "cpu" else False
         # make replay buffer
-        self.rbs = {
+        self.rbs: dict[str, TensorDictReplayBuffer] = {
             x.id: make_replay_buffer(
                 buffer_size=model_params.buffer_size, 
                 device=model_params.buffer_storage_device, 
@@ -615,10 +635,12 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
         )
 
 
-    def clear_buffer(self):
+    def clear_buffer(self, reinitialize: bool = False):
         self.pylogger.info(f"Emptying replay buffer of size {self.rb_size}")
         for key, rb in self.rbs.items():
             rb.empty()
+            if reinitialize:
+                rb._storage.initialized = False
         gc.collect()
         torch.cuda.empty_cache()
 

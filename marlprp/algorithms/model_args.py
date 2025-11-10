@@ -30,8 +30,8 @@ class SelfLabelingParameters(ModelWithReplayBufferParams):
     listnet_alpha: float = 0.0
     num_starts: int = 128
     lookback_intervals: int = None
-    always_clear_buffer: bool = False
-    update_after_every_batch: bool = False
+    always_clear_buffer: bool = True
+    update_after_every_batch: bool = True
     use_advantage_weights: bool = False
     ref_policy_warmup: int = 0
     penalty_coef: float = 0.005

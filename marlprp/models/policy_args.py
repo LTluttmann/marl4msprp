@@ -8,7 +8,7 @@ class TransformerParams(PolicyParams):
     num_heads: int = 8
     feed_forward_hidden: int = None
     qkv_dim: int = field(init=False)
-    input_dropout: float = 0.0 # dropout after positional encoding
+    input_dropout: float = 0.1
     activation: str = "gelu"
     norm_first: bool = False # True
     scale_supply_by_demand: bool = True

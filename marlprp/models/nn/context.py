@@ -5,9 +5,9 @@ from torch.nn.modules import TransformerEncoderLayer
 from marlprp.env.instance import MSPRPState
 from marlprp.utils.ops import gather_by_index
 from marlprp.utils.config import PolicyParams
-from marlprp.models.nn.misc import PositionalEncoding
+from marlprp.models.nn.misc import PositionalEncoding, AttentionGraphPooling
 from marlprp.models.policy_args import TransformerParams, MahamParams, HAMParams
-from marlprp.models.encoder.base import MatNetEncoderOutput, ETEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput, ETEncoderOutput
 
 
 def get_context_emb(params: PolicyParams, key: str = None):
@@ -80,11 +80,27 @@ class MultiAgentContext(nn.Module):
 class MahamAgentContext(MultiAgentContext):
     def __init__(self, params):
         super().__init__(params)
-        self.problem_proj = nn.Linear(1, params.embed_dim, bias=params.bias)
         self.proj_agent = nn.Linear(3 * params.embed_dim, params.embed_dim, bias=params.bias)
         if params.use_ranking_pe:
             self.pe = PositionalEncoding(embed_dim=params.embed_dim, dropout=params.dropout, max_len=1000)
 
+        # self.problem_proj = nn.Linear(1, params.embed_dim, bias=params.bias)
+        self.sku_pooling = AttentionGraphPooling(params)
+        self.workload_enc = PositionalEncoding(embed_dim=params.embed_dim, dropout=params.dropout, max_len=1_000)
+
+
+        
+    def graph_emb(self, embs: MatNetEncoderOutput, state: MSPRPState) -> torch.Tensor:
+        sku_mask = state.demand.eq(0)
+        # (bs, 1)
+        remaining_skus = torch.sum(~sku_mask, dim=1, keepdim=True)
+        # (bs, 1, d)
+        graph_emb = self.sku_pooling(embs["sku"], sku_mask)
+        # (bs, 1, d)
+        graph_emb = self.workload_enc(graph_emb, remaining_skus)
+        return graph_emb.expand(-1,state.num_agents, -1)
+    
+    
     def agent_state_emb(self, state):
         """add positional encoding"""
         state_emb = super().agent_state_emb(state)
@@ -94,21 +110,21 @@ class MahamAgentContext(MultiAgentContext):
             state_emb = self.pe(state_emb, agent_ranks, mask=state.agent_pad_mask)
         return state_emb
 
-    def problem_emb(self, emb: MatNetEncoderOutput, state: MSPRPState):
-        """Add a graph embedding"""
-        # bs, 1
-        remaining_demand = state.demand.sum(1, keepdim=True)
-        # bs, n_agents
-        demand_agent_view = (remaining_demand / state.capacity).expand_as(state.remaining_capacity)
-        # bs, n_sku
-        # weights = state.demand / (remaining_demand + 1e-6)
-        # # bs, 1, emb
-        # weighted_avg = torch.sum(weights.unsqueeze(-1) * emb["sku"], dim=1, keepdim=True)
-        # # bs, num_agents, emb
-        # weighted_avg = weighted_avg.expand(-1, state.num_agents, -1)
-        # bs, num_agents, emb
-        demand_proj = self.problem_proj(demand_agent_view.unsqueeze(-1))
-        return demand_proj # + weighted_avg
+    # def problem_emb(self, emb: MatNetEncoderOutput, state: MSPRPState):
+    #     """Add a graph embedding"""
+    #     # bs, 1
+    #     remaining_demand = state.demand.sum(1, keepdim=True)
+    #     # bs, n_agents
+    #     demand_agent_view = (remaining_demand / state.capacity).expand_as(state.remaining_capacity)
+    #     # bs, n_sku
+    #     # weights = state.demand / (remaining_demand + 1e-6)
+    #     # # bs, 1, emb
+    #     # weighted_avg = torch.sum(weights.unsqueeze(-1) * emb["sku"], dim=1, keepdim=True)
+    #     # # bs, num_agents, emb
+    #     # weighted_avg = weighted_avg.expand(-1, state.num_agents, -1)
+    #     # bs, num_agents, emb
+    #     demand_proj = self.problem_proj(demand_agent_view.unsqueeze(-1))
+    #     return demand_proj # + weighted_avg
 
     def forward(self, emb: MatNetEncoderOutput, state: MSPRPState):
         shelf_emb = emb["shelf"]
@@ -117,7 +133,7 @@ class MahamAgentContext(MultiAgentContext):
         current_loc_emb = gather_by_index(shelf_emb, current_locs, dim=1, squeeze=False)
         # get embedding for agent state
         state_emb = self.agent_state_emb(state)
-        problem_emb = self.problem_emb(emb, state)
+        problem_emb = self.graph_emb(emb, state)
         # cat and project
         agent_emb = torch.cat((current_loc_emb, state_emb, problem_emb), dim=-1)
         agent_emb = self.proj_agent(agent_emb)
