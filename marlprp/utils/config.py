@@ -418,3 +418,27 @@ class TestParams(PhaseParams):
     checkpoint: str = None
     seed: int = 1234567
     gurobi_timeout: int = 3600
+
+    as_time_budget: int = None
+    as_lr: float = 1e-9
+    as_bs: int = 32
+    as_inner_epochs: int = 1
+
+    @property
+    def active_search_params(self) -> "ActiveSearchParams":
+        if not self.as_time_budget:
+            return None
+        return ActiveSearchParams(
+            self.as_time_budget,
+            self.as_lr,
+            self.as_bs,
+            self.as_inner_epochs
+        )
+
+
+@dataclass
+class ActiveSearchParams:
+    time_budget: int
+    lr: float
+    bs: int
+    inner_epochs: int

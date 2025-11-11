@@ -306,13 +306,13 @@ class MultiAgentEnv:
         if isinstance(trajectories_or_state, TensorDict):
             state = trajectories_or_state.get("state")
             aug_locs = augment_xy_data_by_8_fold(state.coordinates)
-            trajectories_aug = trajectories_or_state.repeat(8)
+            trajectories_aug = trajectories_or_state.repeat(8).contiguous()
             trajectories_aug["state"].coordinates = aug_locs
             return trajectories_aug
         elif isinstance(trajectories_or_state, MSPRPState):
             state = trajectories_or_state
             aug_locs = augment_xy_data_by_8_fold(state.coordinates)
-            state_aug = state.repeat(8)
+            state_aug = state.repeat(8).contiguous()
             state_aug.coordinates = aug_locs
             return state_aug
         else:

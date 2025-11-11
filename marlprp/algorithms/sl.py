@@ -115,7 +115,7 @@ class SelfLabeling(LearningAlgorithmWithReplayBuffer):
             self.clear_buffer(reinitialize=self.reinitialize_rb_storage)
 
 
-    @torch.no_grad
+    @torch.no_grad()
     def _collect_experience(self, next_state: MSPRPState, instance_id: str):
         # init storage and perform rollout
         experience_buffer = LazyTensorStorage(self.env.max_num_steps, device=self.model_params.buffer_storage_device)

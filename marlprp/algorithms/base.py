@@ -7,7 +7,7 @@ import wandb
 import torch
 import numpy as np
 
-
+from dataclasses import asdict
 from collections import defaultdict
 from rich.logging import RichHandler
 from tensordict import TensorDict
@@ -87,14 +87,10 @@ class LearningAlgorithm(LightningModule):
         self.test_set_names = None
         self.max_mem = {'train': 0, 'val': 0, 'test': 0}
         if train_params is not None:
-            self.training_mode = True
             self._init_for_training()
-        else:
-            self.training_mode = False
+
 
     def _init_for_training(self):
-        # specifically define batch size to be altered by batch size finder
-        self.train_batch_size = self.setup_parameter(self.train_params.batch_size, dtype=int)
         self.monitor_instance = self.train_params.monitor_instance or self.instance_ids[0]
         self.validation_step_rewards = defaultdict(list)
         self.val_set_names = ["synthetic"]
@@ -152,7 +148,7 @@ class LearningAlgorithm(LightningModule):
     def init_from_checkpoint(
         cls, 
         checkpoint_path: str,
-        env_params: EnvParams,
+        env_params: EnvParams = None,
         model_params: ModelParams = None,
         train_params: TrainingParams = None, 
         val_params: ValidationParams = None, 
@@ -180,6 +176,8 @@ class LearningAlgorithm(LightningModule):
             path_to_config = os.path.join(os.path.split(os.path.split(checkpoint_path)[0])[0], ".hydra")
             # with open(path_to_config, "r") as f: config = yaml.safe_load(f)
             cfg = load_config(config_path=path_to_config, config_name="config.yaml")
+            if env_params is None:
+                env_params = EnvParams(**cfg.env)
             policy_params = PolicyParams.initialize(env=env_params, **cfg["policy"])
             model_params_ckpt = ModelParams.initialize(policy_params, **cfg["model"])
 
@@ -234,7 +232,7 @@ class LearningAlgorithm(LightningModule):
         )
     
     # PyTorch Lightning's built-in test_step method
-    def test_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
+    def test_step(self, batch: tuple[TensorDict, str], batch_idx: int, dataloader_idx: int = 0):
         test_set_name = self.test_set_names[dataloader_idx]
         if batch_idx == 0:
             self.pylogger.info(f"Start testing on set {test_set_name}")
@@ -346,6 +344,15 @@ class LearningAlgorithm(LightningModule):
             self.pylogger.warning(f"No dataset for parameters {params.__class__.__name__}")
 
         return dataloader
+
+    @property
+    def train_batch_size(self):
+        return self.train_params.batch_size
+    
+    @train_batch_size.setter
+    def train_batch_size(self, value):
+        # specifically define batch size to be altered by batch size finder
+        self.train_params.batch_size = value
 
     def train_dataloader(self):
         return EnvLoader(
@@ -675,7 +682,9 @@ class LearningAlgorithmWithReplayBuffer(ManualOptLearningAlgorithm):
 
 
 class EvalModule(LearningAlgorithm):
-
+    training_step = LightningModule.training_step
+    validation_step = LightningModule.validation_step
+    
     def __init__(
         self, 
         env: MultiAgentEnv,
@@ -685,21 +694,18 @@ class EvalModule(LearningAlgorithm):
     ) -> None:
         
         super(LearningAlgorithm, self).__init__()
+
+
         self.pylogger = logger
         self.env = env
         self.policy = policy
         self.test_params = test_params
         self.model_params = model_params
         self.test_set_names = ["synthetic"]
+        self.max_mem = {'test': 0}
 
-    def training_step(self, batch, batch_idx):
-        raise NotImplementedError("training_step not defined for eval module")
-    
-    def validation_step(self, batch, batch_idx):
-        raise NotImplementedError("validation_step not defined for eval module")
-    
     @classmethod
-    def init_from_checkpoint(cls, checkpoint_path, env_params, model_params = None, train_params = None, val_params = None, test_params = None):
+    def init_from_checkpoint(cls, checkpoint_path, env_params = None, model_params = None, train_params = None, val_params = None, test_params = None):
         assert test_params is not None
         model, model_params = super().init_from_checkpoint(checkpoint_path, env_params, model_params, train_params, val_params, test_params)
         return cls(
@@ -719,80 +725,74 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
         self.as_lr = self.test_params.active_search_params.lr
         self.as_bs = self.test_params.active_search_params.bs
         self.as_inner_epochs = self.test_params.active_search_params.inner_epochs
-        self.num_starts = self.test_params.decoding.num_decoding_samples
 
+        # self.validation_step = None
+        self.automatic_optimization = False
+        # self.train_dataloader = self.test_dataloader
+        self.train_params = TrainingParams(
+            optimizer_kwargs={"policy_lr": self.as_lr},
+            dataset_size=1,
+            batch_size=1,
+            **asdict(self.test_params.decoding)
+        )
 
-    def _get_optimizer(self):
-        optimizer_kwargs = config_to_dict(self.train_params.optimizer_kwargs)
-        use_adamw = optimizer_kwargs.pop("use_adamw", False)
-        # rename learning rate key
-        optimizer_kwargs["lr"] = self.as_lr
-        policy_params = self.policy.parameters()
-        if use_adamw:
-            optimizer = AdamW(policy_params, lr=self.as_lr)
-        else:    
-            optimizer = Adam(policy_params, lr=self.as_lr)
-        
-        return optimizer
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx = 0):
+        self.rb = TensorDictReplayBuffer(storage=LazyTensorStorage(1_000, device="auto"))
 
-
-    def on_test_batch_start(self, batch, batch_idx, dataloader_idx = 0):
-        self.rb = TensorDictReplayBuffer(storage=LazyTensorStorage(self.env.max_num_steps, device="auto"))
-
-    def on_test_batch_end(self, outputs, batch, batch_idx, dataloader_idx = 0):
+    def on_train_batch_end(self, outputs, batch, batch_idx, dataloader_idx = 0):
         self.policy.load_state_dict(copy.deepcopy(self.pretrained_policy_state))
 
+    def train_dataloader(self):
+        test_dls = self._get_dataloader(self.test_params, dataset_dist=None)
+        test_set_names, test_dls = list(test_dls.values()), list(test_dls.values())
+        assert len(test_dls) == 1, "active search only supports a single test dataset"
+        self.test_set_name = test_set_names[0]
+        return test_dls[0]
 
-    # PyTorch Lightning's built-in test_step method
-    def test_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
 
+    @torch.no_grad()
+    def _collect_training_data(self, state, batch_idx):
+        state_stack = LazyTensorStorage(self.env.max_num_steps, device="auto")
+        _, reward, state_stack = self.policy(state, self.env, storage=state_stack)
+        if reward.mean() > self.curr_best_rew:
+            self.pylogger.info(f"Improved performance for instance {batch_idx} during active search: {self.curr_best_rew} -> {reward.mean()}")
+            # clear current buffer
+            self.clear_buffer()
+            # updateu best reward
+            self.curr_best_rew = reward.mean()
+            # flatten so that every step is an experience
+            state_stack = state_stack.reshape(-1).contiguous()
+            # filter out steps where the instance is already in terminal state. There is nothing to learn from
+            state_stack = state_stack[~state_stack["state"].done]
+            if hasattr(self.env, "augment_states"):
+                state_stack = self.env.augment_states(state_stack)
+            # put new best solution to experience replay buffer
+            self.rb.extend(state_stack)
+        else:
+            # did not improve, keep current experience buffer and use it for fine tuning
+            pass
+
+
+    def training_step(self, batch: TensorDict, batch_idx: int, dataloader_idx: int = 0):
+        batch, _ = batch
         assert batch.size(0) == 1
-        test_set_name = self.test_set_names[dataloader_idx]
-        if batch_idx == 0:
-            self.pylogger.info(f"Start testing on set {test_set_name}")
-
-        state, _ = self.env.reset(batch)
+        state = self.env.reset(batch)
         start_time = time.time()
-        duration = 0
-
-        curr_best_rew = -torch.inf
-        while duration < self.test_params.active_search_params.time_budget:
-
-            with torch.no_grad():
-                # init storage and perform rollout
-                state_stack = LazyTensorStorage(self.env.max_num_steps, device="auto")
-                done_tds, state_stack = self.policy(state, self.env, storage=state_stack)
-                if done_tds["reward"].mean() > curr_best_rew:
-                    curr_best_rew = done_tds["reward"].mean()
-                # flatten so that every step is an experience
-                state_stack = state_stack.reshape(-1).contiguous()
-                # filter out steps where the instance is already in terminal state. There is nothing to learn from
-                state_stack = state_stack[~state_stack["done"]]
-                if hasattr(self.env, "augment_states"):
-                    state_stack = self.env.augment_states(state_stack)
-
-                self.rb.extend(state_stack)
-
+        self.curr_best_rew = -torch.inf
+        while time.time() - start_time < self.test_params.active_search_params.time_budget:
+            self._collect_training_data(state, batch_idx)
             for _ in range(self.as_inner_epochs):
-                if duration > self.test_params.active_search_params.time_budget:
-                    self.clear_buffer()
-                    break
-                
                 sub_td = self.rb.sample(self.as_bs).clone().to(self.device).squeeze(0)
+                # with torch.set_grad_enabled(True):
                 # get logp of target policy for pseudo expert actions 
                 logp, _, entropy, mask = self.policy.evaluate(sub_td, self.env)
                 # (bs)
                 loss = ce_loss(logp, entropy, mask=mask).mean()
                 self.manual_opt_step(loss)
 
-                duration = time.time() - start_time
-
-            self.clear_buffer()
-
-
         self.log(
-            f"test/{test_set_name}/reward", 
-            float(curr_best_rew), 
+            f"test/{self.test_set_name}/reward", 
+            float(self.curr_best_rew), 
             prog_bar=True, 
             on_step=False, 
             on_epoch=True, 
@@ -801,8 +801,8 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
         )
 
         self.log(
-            f"duration/{test_set_name}",
-            duration, 
+            f"duration/{self.test_set_name}",
+            time.time() - start_time, 
             on_step=False, 
             on_epoch=True, 
             sync_dist=True,
