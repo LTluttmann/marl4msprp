@@ -1,0 +1,6 @@
+scheduler_name:
+  "cosine"
+scheduler_kwargs:
+  min_lr: 1e-7
+  num_warmup_steps: 3
+  num_training_steps: ${train.epochs}

@@ -1,14 +1,19 @@
 import torch
 import torch.nn as nn
+import functools
+import torch.distributed as dist
+
 from torch import Tensor
 from typing import Union
 from einops import rearrange
-import torch.distributed as dist
 from tensordict import TensorDict
+
 from marlprp.utils.logger import get_lightning_logger
+from marlprp.utils.config import DecodingConfig
 
 
 log = get_lightning_logger(__name__)
+
 
 class NormByConstant(nn.Module):
     """torch module to apply a constant norm factor on an input sequence"""
@@ -76,6 +81,27 @@ def batchify(
     for s in reversed(shape):
         x = _batchify_single(x, s) if s > 0 else x
     return x
+
+def augment_or_batchify(td: TensorDict, env, cfg: DecodingConfig):
+    bs = td.size(0)
+    num_augment = cfg.num_augment
+    if num_augment > 1:
+        assert hasattr(env, "augment_states")
+        td = env.augment_states(td, num_augment=num_augment)
+        assert td.size(0) // bs == num_augment, f"Augmentation failed. Expected {num_augment} augmentations, got {td.size(0) // bs}"
+
+    num_strategies = cfg.num_strategies
+    if num_strategies > 1: 
+        bs = td.size(0)
+        strategy_id = torch.arange(num_strategies, device=td.device).repeat_interleave(bs)
+        td = td.repeat(num_strategies)
+        td["strategy_id"] = strategy_id
+        
+    num_starts = cfg.num_starts
+    if num_starts > 1:
+        # Expand td to batch_size * num_starts
+        td = batchify(td, num_starts)
+    return td, num_starts
 
 
 def _unbatchify_single(
@@ -177,3 +203,24 @@ def all_gather_w_padding(q: torch.Tensor, ws: int):
     for q, size in zip(all_qs_padded, all_sizes):
         all_qs.append(q[:size])
     return all_qs
+
+def augment_xy_data_by_8_fold(problems):
+    # problems.shape: (batch, problem, 2)
+
+    x = problems[:, :, [0]]
+    y = problems[:, :, [1]]
+    # x,y shape: (batch, problem, 1)
+
+    dat1 = torch.cat((x, y), dim=2)
+    dat2 = torch.cat((1 - x, y), dim=2)
+    dat3 = torch.cat((x, 1 - y), dim=2)
+    dat4 = torch.cat((1 - x, 1 - y), dim=2)
+    dat5 = torch.cat((y, x), dim=2)
+    dat6 = torch.cat((1 - y, x), dim=2)
+    dat7 = torch.cat((y, 1 - x), dim=2)
+    dat8 = torch.cat((1 - y, 1 - x), dim=2)
+
+    aug_problems = torch.cat((dat1, dat2, dat3, dat4, dat5, dat6, dat7, dat8), dim=0)
+    # shape: (8*batch, problem, 2)
+
+    return aug_problems

@@ -9,3 +9,4 @@ min_supply: 1
 avg_supply_to_demand_ratio: 2.0
 num_depots: 1
 id: ${env.num_shelves}s-${env.num_skus}i-${env.num_storage_locations}p
+num_augment: 8

@@ -25,30 +25,33 @@ class PPOParams(ModelWithReplayBufferParams):
 @dataclass(kw_only=True)
 class SelfLabelingParameters(ModelWithReplayBufferParams):
     algorithm: str = "sl"
-    num_starts: int = 100
-    entropy_coef: float = 0. # 0.05
-    loss: str = None
+    entropy_coef: float = 0.0
+    loss: str = "ce"
     listnet_alpha: float = 0.0
+    num_starts: int = 128
     lookback_intervals: int = None
-    always_clear_buffer: bool = False
-    update_after_every_batch: bool = False
+    always_clear_buffer: bool = True
+    update_after_every_batch: bool = True
+    use_advantage_weights: bool = False
+    ref_policy_warmup: int = 0
+    penalty_coef: float = 0.005
 
     def __post_init__(self):
         super().__post_init__()
 
-        if self.eval_multistep and self.eval_per_agent:
-            # softmax is calculated based on agents#
-            # thus we need ce loss since this assumes 
-            # probs to sum up to one
-            self.loss = "ce"
-        elif self.eval_multistep and not self.eval_per_agent:
-            # softmax is calculated over the entire action space. Technically,
-            # we have multiple "correct labels", thus we should use a list ranking
-            # loss here
-            self.loss = "list"
-        else:
-            # we evaluate one action per time, both losses are identical
-            self.loss = "ce"
+        if self.listnet_alpha != 0:
+            self.loss = "listnet_weighted"
+        if self.num_starts is not None and self.ref_model_num_starts is None and self.ref_model_num_decoding_samples is None:
+            # ref_model_num_starts not set properly but num_starts is used instead
+            self.ref_model_num_decoding_samples = self.num_starts
+        if self.ref_model_num_augment is None:
+            # if not set, use num_augment from environment
+            self.ref_model_num_augment = self.policy.env.num_augment
+        self.ref_model_select_best = False  # handle selection logic in model
+        self.ref_model_num_strategies = getattr(self.policy, "num_strategies", None)
+        assert not self.ref_model_decode_type == "greedy", "Greedy decoding is not available in Self-Labeling"
+        assert self.ref_model_decoding.num_samples > 1, "We need multiple samples for Self-Labeling"
+
 
 
 @dataclass(kw_only=True)

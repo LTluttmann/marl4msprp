@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tensordict import TensorDict
 from einops import rearrange
 from typing import List
 import math
 
-from marlprp.models.policy_args import TransformerParams
+from marlprp.models.policy_args import PolicyParams, TransformerParams
 
 
 class MHAWaitOperationEncoder(nn.Module):
@@ -212,3 +213,43 @@ class MLP(nn.Module):
 
     def _get_act(self, is_last):
         return self.out_act if is_last else self.hidden_act
+
+
+class AttentionGraphPooling(nn.Module):
+    def __init__(self, params: PolicyParams):
+        super().__init__()
+        self.embed_dim = params.embed_dim
+        # Learnable query vector for attention
+        self.query = nn.Parameter(torch.randn(1, 1, params.embed_dim))
+        
+    def forward(self, node_embeddings, node_mask = None):
+        """
+        Args:
+            embeddings: Tensor of shape (B, S, D)
+            mask: Tensor of shape (B, S) with !!!True indicating invalid positions!!!
+        Returns:
+            Pooled tensor of shape (B, 1, D)
+        """
+        bs = node_embeddings.size(0)
+        # (b 1 N)
+        # (b 1 d)
+        query = self.query.expand(bs, 1, -1)
+        # Calculate attention scores using dot product between query and node embeddings
+        # (b 1 N)
+        attn_scores = torch.bmm(query, node_embeddings.transpose(-2, -1)) / math.sqrt(self.embed_dim)
+
+        if node_mask is not None:
+            node_mask = node_mask.unsqueeze(1)
+            all_masked = node_mask.all(-1, keepdim=True)
+            # Apply mask (set attention scores for invalid nodes to -inf)
+            attn_scores = attn_scores.masked_fill(node_mask, float("-inf"))
+            # Normalize with softmax
+            attn_weights = F.softmax(attn_scores, dim=-1) 
+            attn_weights = attn_weights.masked_fill(all_masked.expand_as(attn_weights), 0.0)
+        else:
+            attn_weights = F.softmax(attn_scores, dim=-1) 
+        # Weighted sum of node embeddings: 
+        graph_embedding = torch.bmm(attn_weights, node_embeddings)
+        # (b 1 d)
+        return graph_embedding
+    

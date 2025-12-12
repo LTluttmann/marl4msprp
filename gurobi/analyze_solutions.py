@@ -4,7 +4,7 @@ import pyrootutils
 import numpy as np
 
 root = pyrootutils.find_root(__file__, indicator=".gitignore")
-data_path = os.path.join(root, "data_test/large/")
+data_path = os.path.join(root, "data_test/icaps/")
 instance_paths = [os.path.join(data_path, x) for x in os.listdir(data_path)]
 
 solutions = {}
@@ -12,7 +12,7 @@ solutions = {}
 if __name__ == "__main__":
     for instance_path in instance_paths:
         instance_name = instance_path.split("/")[-1]
-        solution_path = os.path.join(instance_path, "solutions3600.pth")
+        solution_path = os.path.join(instance_path, "gurobi3600.pth")
         try:
             solution = torch.load(solution_path)
         except FileNotFoundError:

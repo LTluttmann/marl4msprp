@@ -15,6 +15,8 @@ class MSPRPState:
     packing_items: torch.Tensor = None
     remaining_capacity: torch.Tensor = None
     active_agent: torch.Tensor = None
+    done: torch.Tensor = None
+    start_nodes: torch.Tensor = None
 
     @classmethod
     def initialize(
@@ -28,6 +30,7 @@ class MSPRPState:
         tour_length: torch.Tensor = None,
         packing_items: torch.Tensor = None,
         active_agent: torch.Tensor = None,
+        done: torch.Tensor = None,
     ) -> "MSPRPState":
         batch_size = supply.size(0)
         return cls(
@@ -40,6 +43,7 @@ class MSPRPState:
             tour_length=tour_length,
             packing_items=packing_items,
             active_agent=active_agent,
+            done=done,
             batch_size=[batch_size],
             device=supply.device
         )
@@ -70,6 +74,11 @@ class MSPRPState:
                 device=self.device
             )
 
+        if self.done is None:
+            self.done = (self.demand.le(1e-5).all(-1) & self.agent_at_depot().all(-1))
+
+        if self.start_nodes is None:
+            self.start_nodes = self.current_location.clone()
 
     @property
     def capacity(self):
@@ -131,10 +140,10 @@ class MSPRPState:
         else: 
             return self.current_location.gather(1, agent[:, None]).squeeze(1) < self.num_depots
     
-    @property
-    def done(self):
-        # (bs)
-        return (self.demand.le(1e-5).all(-1) & self.agent_at_depot().all(-1))
+    # @property
+    # def done(self):
+    #     # (bs)
+    #     return (self.demand.le(1e-5).all(-1) & self.agent_at_depot().all(-1))
     
     @property
     def current_loc_ohe(self):

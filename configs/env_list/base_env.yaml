@@ -1,6 +1,6 @@
 name: msprp
 num_agents: null
-min_demand: 0
+min_demand: 1
 max_demand: 4
 min_supply: 1
 avg_supply_to_demand_ratio: 2.0
