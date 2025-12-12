@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
     
     if cfg.get("logger", None) is not None:
         log.info("Instantiating loggers...")
-        logger = get_wandb_logger(cfg, model_params, hc, training=False)
+        logger = get_wandb_logger(cfg, model_params, hc, model, eval_only=True)
     else:
         logger = None
 
@@ -54,6 +54,9 @@ def main(cfg: DictConfig):
         devices=trainer_params.devices,
         logger=logger,
         default_root_dir=hc.runtime.output_dir if hc else None,
+        enable_checkpointing=False,
+        precision=trainer_params.precision,
+        max_epochs=1,
     )
 
 

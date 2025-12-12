@@ -200,7 +200,18 @@ class EnvParamList:
         # Returns the length of the list
         return len(self.envs)
 
-
+    def __getattr__(self, attr):
+        """
+        Called only if normal attribute lookup on self fails.
+        Then tries to resolve the attribute on self.envs[0].
+        """
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        try:
+            return getattr(self.envs[0], attr)
+        except (IndexError, AttributeError):
+            raise AttributeError(f"'EnvParamList' object has no attribute '{attr}'")
+        
 
 @dataclass(kw_only=True)
 class LargeEnvParams(BaseEnvParams):

@@ -5,7 +5,7 @@ import torch.nn as nn
 from einops import rearrange
 from marlprp.models.policy_args import TransformerParams
 
-from .sparse import SparseCrossAttention
+from .sparse import SparseCrossAttention, SemiSparseCrossAttention
 from .mixed_scores import apply_weights_and_combine, MixedScoreFF
 
 
@@ -59,16 +59,15 @@ class EfficientMixedScoreMultiHeadAttentionLayer(nn.Module):
         del logits
 
         if attn_mask is not None:
-            mask1 = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(l1).contiguous()
-            mask2 = mask1.clone().transpose(-2, -1)
+            attn_mask_t = attn_mask.clone().transpose(-2, -1)
         else:
-            mask1, mask2 = None, None
+            attn_mask_t = None
 
         h1 = self.out_proj1(
-            apply_weights_and_combine(l1, v2, mask=mask1, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
+            apply_weights_and_combine(l1, v2, mask=attn_mask, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
         )
         h2 = self.out_proj2(
-            apply_weights_and_combine(l2, v1, mask=mask2, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
+            apply_weights_and_combine(l2, v1, mask=attn_mask_t, temperature=self.temp, tanh_clipping=self.tanh_clip, dropout=self.dropout)
         )
 
         return h1, h2
@@ -120,9 +119,6 @@ class MixedScoreMultiHeadAttention(nn.Module):
         )
         logits = self.mixed_scores_layer(logits, cost_mat)
 
-        if attn_mask is not None:
-            attn_mask = attn_mask.view(batch_size, 1, row_cnt, col_cnt).expand_as(logits).contiguous()
-
         out = self.out_proj(apply_weights_and_combine(logits, v, mask=attn_mask, dropout=self.dropout))
         return out
 
@@ -132,8 +128,12 @@ class MixedScoreMultiHeadAttentionLayer(nn.Module):
     def __init__(self, model_params: TransformerParams):
         super().__init__()
         if model_params.ms_sparse_attn:
-            self.row_encoding_block = SparseCrossAttention(model_params)
-            self.col_encoding_block = SparseCrossAttention(model_params)
+            if model_params.use_sku_attn or model_params.fully_sparse:
+                self.row_encoding_block = SparseCrossAttention(model_params)
+                self.col_encoding_block = SparseCrossAttention(model_params)
+            else:
+                self.row_encoding_block = SemiSparseCrossAttention(model_params)
+                self.col_encoding_block = SemiSparseCrossAttention(model_params)
         else:   
             self.row_encoding_block = MixedScoreMultiHeadAttention(model_params)
             self.col_encoding_block = MixedScoreMultiHeadAttention(model_params)
@@ -143,12 +143,12 @@ class MixedScoreMultiHeadAttentionLayer(nn.Module):
         # col_emb.shape: (batch, col_cnt, embedding)
         # cost_mat.shape: (batch, row_cnt, col_cnt)
         if cost_mat is not None:
-            cost_mat_t = cost_mat.transpose(2, 1).contiguous()
+            cost_mat_t = cost_mat.transpose(-2, -1).contiguous()
         else:
             cost_mat_t = None
 
         if attn_mask is not None:
-            attn_mask_t = attn_mask.transpose(2, 1).contiguous()
+            attn_mask_t = attn_mask.transpose(-2, -1).contiguous()
         else:
             attn_mask_t = None
         x1_out = self.row_encoding_block(x1, x2, cost_mat=cost_mat, attn_mask=attn_mask)

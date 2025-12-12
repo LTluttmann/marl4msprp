@@ -16,8 +16,8 @@ model_name: ${model.algorithm}-${policy.policy}
 
 train:  
   train: true
-  dataset_size: 20000
-  batch_size: 2000
+  dataset_size: 1000
+  batch_size: 1000
   lr_scheduler: ${lr_scheduler}
   lr_scheduler_kwargs:
     milestones: [35]

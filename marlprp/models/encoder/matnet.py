@@ -21,15 +21,18 @@ class MatNetEncoderLayer(nn.Module):
         self.params = params
         self.norm_first = params.norm_first
 
-        self.shelf_mha = TransformerEncoderLayer(
-            d_model=params.embed_dim,
-            nhead=params.num_heads,
-            dim_feedforward=params.feed_forward_hidden,
-            dropout=params.dropout,
-            activation=params.activation,
-            norm_first=params.norm_first,
-            batch_first=True,
-        )
+        if self.params.use_self_attn:
+            self.shelf_mha = TransformerEncoderLayer(
+                d_model=params.embed_dim,
+                nhead=params.num_heads,
+                dim_feedforward=params.feed_forward_hidden,
+                dropout=params.dropout,
+                activation=params.activation,
+                norm_first=params.norm_first,
+                batch_first=True,
+            )
+        else:
+            self.shelf_mha = MockTransformer(params)
 
         if self.params.use_sku_attn:
             self.sku_mha = TransformerEncoderLayer(
@@ -72,7 +75,6 @@ class MatNetEncoderLayer(nn.Module):
     ):
 
         #### CROSS ATTENTION ####
-
         if self.norm_first:
             shelf_emb_out, sku_emb_out = self.cross_attn(
                 self.shelf_norm(shelf_emb), 
@@ -98,9 +100,7 @@ class MatNetEncoderLayer(nn.Module):
             sku_emb_out = self.sku_norm(sku_emb_out + sku_emb)
 
         #### SELF ATTENTION ####
-
         shelf_emb_out = self.shelf_mha(shelf_emb_out, src_mask=shelf_mask)
-
         # (bs, num_ma, emb)
         sku_emb_out = self.sku_mha(sku_emb_out, src_mask=sku_mask)
 
@@ -133,6 +133,7 @@ class MatNetEncoder(BaseEncoder):
         if self.mask_no_edge:
             # (bs, num_job, num_ma)
             cross_mask = edge_feat.eq(0)
+            cross_mask = cross_mask[:, None].expand(-1, self.num_heads, -1, -1).contiguous()
         else:
             cross_mask = None
 

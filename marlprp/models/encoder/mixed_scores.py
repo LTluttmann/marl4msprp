@@ -17,10 +17,13 @@ def apply_weights_and_combine(
         temperature: float = 1.0,
         dropout: float = 0.0,
     ):
-    logits = logits.clone()
+    # logits = logits.clone()
     # scale to avoid numerical underflow
     if scale:
         logits = logits / (logits.std() + 1e-6)
+
+    if temperature is not None and temperature != 1:
+        logits /= temperature
 
     # tanh clipping to avoid explosions
     if tanh_clipping > 0:
@@ -32,7 +35,7 @@ def apply_weights_and_combine(
         # For normal masked positions, set logits to -inf
         logits = logits.masked_fill(mask, float("-inf"))
         # shape: (batch, num_heads, row_cnt, col_cnt)
-        weights = torch.softmax(logits / temperature, dim=-1)
+        weights = torch.softmax(logits, dim=-1)
         # Zero out weights where everything was masked
         weights = weights.masked_fill(all_masked.expand_as(weights), 0.0)
     else:
@@ -41,6 +44,7 @@ def apply_weights_and_combine(
     weights = F.dropout(weights, p=dropout)
     # shape: (batch, num_heads, row_cnt, qkv_dim)
     out = torch.matmul(weights, v)
+    del weights
     # shape: (batch, row_cnt, num_heads, qkv_dim)
     out = rearrange(out, "b h s d -> b s (h d)")
     return out

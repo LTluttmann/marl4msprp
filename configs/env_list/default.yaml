@@ -15,20 +15,23 @@ env:
 
 model:
   algorithm: sl
-  inner_epochs: 15
+  inner_epochs: #  5
+    start: 2
+    max: 10
+    patience: 2
+    plateau_factor: 1.5
   rollout_batch_size:
-    10s-3i-20p: 500
-    10s-6i-20p: 500
-    10s-9i-20p: 500
+    10s-3i-20p: 250
+    10s-6i-20p: 250
+    10s-9i-20p: 250
     25s-12i-50p: 250
     25s-15i-50p: 250
     25s-18i-50p: 200
     40s-15i-100p: 200
     40s-20i-100p: 100
     40s-30i-100p: 50
-    50s-100i-500p: 10
-  mini_batch_size: 2000
-  num_starts: 120
+  mini_batch_size: 500
+  num_starts: 128
   eval_per_agent: True
   eval_multistep: True
   always_clear_buffer: True
@@ -37,8 +40,8 @@ model:
 
 train:
   epochs: 150
-  batch_size: 1000
-  dataset_size: 5000
+  batch_size: 250
+  dataset_size: 4000
   optimizer_kwargs:
     policy_lr: 5e-5
     weight_decay: 1e-6
@@ -50,4 +53,17 @@ train:
 
 val:
   dataset_size: 30000
-  batch_size: 150
+  batch_size: 1000
+
+test:
+  batch_size: 1
+  data_dir:
+    - ${paths.test_data_dir}/icaps/25s-12i-50p/td_data.pth
+    - ${paths.test_data_dir}/icaps/25s-15i-50p/td_data.pth
+    - ${paths.test_data_dir}/icaps/25s-18i-50p/td_data.pth
+    - ${paths.test_data_dir}/icaps/40s-15i-100p/td_data.pth
+    - ${paths.test_data_dir}/icaps/40s-20i-100p/td_data.pth
+    - ${paths.test_data_dir}/icaps/40s-30i-100p/td_data.pth
+    - ${paths.test_data_dir}/large/50s-100i-200p/td_data.pth
+    - ${paths.test_data_dir}/large/50s-250i-500p/td_data.pth
+    - ${paths.test_data_dir}/large/50s-500i-1000p/td_data.pth

@@ -5,7 +5,7 @@ from torch_scatter import scatter_softmax
 from einops import rearrange
 
 from .utils import _scatter_add
-from .mixed_scores import MixedScoreFF
+from .mixed_scores import MixedScoreFF, apply_weights_and_combine
 from marlprp.models.policy_args import TransformerParams
 
 
@@ -63,6 +63,61 @@ class SparseCrossAttention(nn.Module):
         heads = self._determine_weights_and_combine(logits, v, group_ids, num_groups)
         del logits
         return self.W_o(rearrange(heads, "(b s) h d -> b s (h d)", b=bs, s=row_cnt, h=self.num_heads))
+
+
+class SemiSparseCrossAttention(nn.Module):
+
+    def __init__(self, params: TransformerParams):
+        super().__init__()
+        self.ms_scores_layer = MixedScoreFF(params)
+        self.embed_dim = params.embed_dim
+        self.num_heads = params.num_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        self.W_q = nn.Linear(self.embed_dim, self.embed_dim)
+        self.W_k = nn.Linear(self.embed_dim, self.embed_dim)
+        self.W_v = nn.Linear(self.embed_dim, self.embed_dim)
+        self.W_o = nn.Linear(self.embed_dim, self.embed_dim)
+        self.dropout = nn.Dropout(params.dropout)
+        self.tanh_clip = params.ms_scores_tanh_clip or 0
+        self.temp = params.ms_scores_softmax_temp
+        self.beta = nn.Parameter(torch.full((1,self.num_heads,1,1), fill_value=float(-self.tanh_clip)), requires_grad=True)
+
+    @staticmethod
+    def _edges_from_weight_matrix(weights: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        b, s, p = (weights > 0).detach().nonzero(as_tuple=True)
+        w = weights[b, s, p]
+        return b, s, p, w
+
+    def forward(self, row_emb, col_emb, cost_mat, attn_mask: torch.Tensor = None):
+        assert cost_mat is not None, "SparseCrossAttention requires a cost matrix"
+        bs, row_cnt, emb_dim = row_emb.shape
+        col_cnt = col_emb.size(1)
+
+        b_idx, s_idx, p_idx, w = self._edges_from_weight_matrix(cost_mat)
+        # we need to full v
+        v = rearrange(self.W_v(col_emb), "b s (h d) -> b h s d", h=self.num_heads)
+
+        row_emb = row_emb[b_idx, s_idx]
+        col_emb = col_emb[b_idx, p_idx]
+
+        q = self.W_q(row_emb).view(-1, self.num_heads, self.head_dim)
+        k = self.W_k(col_emb).view(-1, self.num_heads, self.head_dim)
+        del row_emb, col_emb   # free memory early
+
+        logits = (q * k).sum(dim=-1) / (self.head_dim ** 0.5)
+        del q, k  # both are no longer needed
+
+        logits = self.ms_scores_layer(logits, w.unsqueeze(1))
+
+        if self.tanh_clip > 0:
+            logits = torch.tanh(logits) * self.tanh_clip
+
+        # fill attn matrix with logits
+        scores = self.beta.expand(bs, self.num_heads, row_cnt, col_cnt).contiguous()
+        scores[b_idx, :, s_idx, p_idx] = logits
+
+        heads = apply_weights_and_combine(scores, v, attn_mask)
+        return self.W_o(heads)
 
 
 

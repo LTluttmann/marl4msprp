@@ -12,11 +12,42 @@ torch.manual_seed(0)
 device = "cuda:0"
 
 
+def benchmark_train_step(layer, shelf, prod, supply, n_warmup=3, n_runs=10):
+    # Make sure inputs require grad if needed (only matters if layer depends on them)
+    if shelf.requires_grad is False:
+        shelf = shelf.clone().requires_grad_()
+    if prod.requires_grad is False:
+        prod = prod.clone().requires_grad_()
+
+    torch.cuda.synchronize()
+
+    # Warm-up
+    for _ in range(n_warmup):
+        out = layer(shelf, prod, cost_mat=supply)
+        loss = out[0].sum()
+        loss.backward()
+        layer.zero_grad(set_to_none=True)
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+
+    # Timed section
+    t0 = time.time()
+    for _ in range(n_runs):
+        out = layer(shelf, prod, cost_mat=supply)
+        loss = out[0].sum()
+        loss.backward()
+        layer.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+    t1 = time.time()
+
+    mem = torch.cuda.max_memory_allocated() / 1024**2
+    return (t1 - t0) / n_runs * 1000, mem  # ms, MB
 
 
 # --- Benchmark Function ---
 @torch.no_grad()
-def benchmark(layer, shelf, prod, supply, n_warmup=10, n_runs=50):
+def benchmark(layer, shelf, prod, supply, n_warmup=3, n_runs=10):
     torch.cuda.synchronize()
     for _ in range(n_warmup): layer(shelf, prod, cost_mat=supply)
     torch.cuda.synchronize()
@@ -28,9 +59,12 @@ def benchmark(layer, shelf, prod, supply, n_warmup=10, n_runs=50):
     mem = torch.cuda.max_memory_allocated() / 1024**2
     return (t1 - t0) / n_runs * 1000, mem  # ms, MB
 
+
+
 # --- Setup ---
-B, S, P, D, H = 25000, 25, 18, 256, 8
-num_pairs = 50
+bench_fn = benchmark
+B, S, P, D, H = 128, 50, 1000, 256, 8
+num_pairs = 1000
 density = num_pairs/(S*P)
 
 shelf = torch.randn(B, S, D, device=device).float()
@@ -43,16 +77,21 @@ kwargs = {
     'num_heads': H,
     'chunk_ms_scores_batch': 0,
     'bias': True,
-    'param_sharing': True,
+    'param_sharing': False,
 }
 
 
 dense_encoder = MatNetEncoderLayer(TransformerParams(ms_sparse_attn=False, **kwargs)).to(device)
-sparse_encoder = MatNetEncoderLayer(TransformerParams(ms_sparse_attn=True, **kwargs)).to(device)
+sparse_encoder = MatNetEncoderLayer(TransformerParams(ms_sparse_attn=True, use_self_attn=False, **kwargs)).to(device)
 
 # --- Benchmark ---
-dense_time, dense_mem = benchmark(dense_encoder, shelf, prod, supply)
-sparse_time, sparse_mem = benchmark(sparse_encoder, shelf, prod, supply)
+try:
+    dense_time, dense_mem = bench_fn(dense_encoder, shelf, prod, supply)
+except:
+    dense_time = 1000000000
+    dense_mem = 100000000
+
+sparse_time, sparse_mem = bench_fn(sparse_encoder, shelf, prod, supply)
 
 
 print("\n---- Dense vs Sparse Attention ----")

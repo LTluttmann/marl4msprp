@@ -31,11 +31,11 @@ class MultiAgentInitEmbedding(nn.Module):
         self.sku_proj = nn.Linear(2, params.embed_dim, bias=params.bias)
         self.sku_dropout = nn.Dropout(p=params.input_dropout)
         self.node_dropout = nn.Dropout(p=params.input_dropout)
-        if params.env.use_stay_token:
-            # additional bias term for shelves where agents can wait (CAD)
-            self.shelf_proj = nn.Linear(5, params.embed_dim, bias=params.bias)
-        else:
-            self.shelf_proj = nn.Linear(4, params.embed_dim, bias=params.bias)
+        # if params.env.use_stay_token:
+        #     # additional bias term for shelves where agents can wait (CAD)
+        #     self.shelf_proj = nn.Linear(5, params.embed_dim, bias=params.bias)
+        # else:
+        self.shelf_proj = nn.Linear(4, params.embed_dim, bias=params.bias)
 
     def _init_depot_embed(self, state: MSPRPState):
         depot_coordinates = state.coordinates[:, :state.num_depots]
@@ -61,10 +61,10 @@ class MultiAgentInitEmbedding(nn.Module):
             mean_perc_supply
         ]
 
-        if self.params.env.use_stay_token:
-            # shelf has no demand but some agents are currently there and may wait there
-            is_cad_shelf = state.current_loc_ohe[..., state.num_depots:].sum(1).clamp_max(1) & num_stored_skus.eq(0)
-            feats.append(is_cad_shelf.float())
+        # if self.params.env.use_stay_token:
+        #     # shelf has no demand but some agents are currently there and may wait there
+        #     is_cad_shelf = state.current_loc_ohe[..., state.num_depots:].sum(1).clamp_max(1) & num_stored_skus.eq(0)
+        #     feats.append(is_cad_shelf.float())
         return self.shelf_proj(torch.stack(feats, dim=-1))
 
     def _init_sku_embed(self, state: MSPRPState):

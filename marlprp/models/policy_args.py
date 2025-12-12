@@ -24,6 +24,8 @@ class TransformerParams(PolicyParams):
     ms_scores_tanh_clip: float = 0.0
     ms_sparse_attn: bool = False
     use_sku_attn: bool = True
+    use_self_attn: bool = True
+    fully_sparse: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -31,6 +33,8 @@ class TransformerParams(PolicyParams):
         self.qkv_dim = self.embed_dim // self.num_heads
         assert self.embed_dim % self.num_heads == 0, "self.kdim must be divisible by num_heads"
         self.ms_hidden_dim = self.ms_hidden_dim or self.qkv_dim
+        if not self.use_self_attn:
+            self.use_sku_attn = False
 
 
 @dataclass(kw_only=True)

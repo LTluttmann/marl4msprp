@@ -505,7 +505,7 @@ class LearningAlgorithm(LightningModule):
             self.max_mem[phase] = mem_mb
 
             # Log both to Lightning & W&B
-            self.log(f'max_gpu_mem_{phase}_MB', mem_mb, prog_bar=True, rank_zero_only=True)
+            self.log(f'max_gpu_mem_{phase}_MB', mem_mb, prog_bar=False, rank_zero_only=True)
             if self.logger and hasattr(self.logger.experiment, "log"):
                 self.logger.experiment.log({f"max_gpu_mem_{phase}_MB": mem_mb})
 
@@ -735,6 +735,8 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
             batch_size=1,
             **asdict(self.test_params.decoding)
         )
+        self.init_test_rewards = []
+        self.as_test_rewards = []
 
     def on_train_batch_start(self, batch, batch_idx, dataloader_idx = 0):
         self.rb = TensorDictReplayBuffer(storage=LazyTensorStorage(1_000, device="auto"))
@@ -744,7 +746,7 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
 
     def train_dataloader(self):
         test_dls = self._get_dataloader(self.test_params, dataset_dist=None)
-        test_set_names, test_dls = list(test_dls.values()), list(test_dls.values())
+        test_set_names, test_dls = list(test_dls.keys()), list(test_dls.values())
         assert len(test_dls) == 1, "active search only supports a single test dataset"
         self.test_set_name = test_set_names[0]
         return test_dls[0]
@@ -756,6 +758,8 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
         _, reward, state_stack = self.policy(state, self.env, storage=state_stack)
         if reward.mean() > self.curr_best_rew:
             self.pylogger.info(f"Improved performance for instance {batch_idx} during active search: {self.curr_best_rew} -> {reward.mean()}")
+            if self.curr_best_rew == -torch.inf:
+                self.init_test_rewards.append(reward.mean().item())
             # clear current buffer
             self.clear_buffer()
             # updateu best reward
@@ -790,6 +794,7 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
                 loss = ce_loss(logp, entropy, mask=mask).mean()
                 self.manual_opt_step(loss)
 
+        self.as_test_rewards.append(self.curr_best_rew.item())
         self.log(
             f"test/{self.test_set_name}/reward", 
             float(self.curr_best_rew), 
@@ -813,3 +818,9 @@ class ActiveSearchModule(EvalModule, ManualOptLearningAlgorithm):
         self.rb.empty()
         gc.collect()
         torch.cuda.empty_cache()
+
+    def on_train_end(self):
+        test_avg_reward = sum(self.as_test_rewards) / len(self.as_test_rewards)
+        init_avg_reward = sum(self.init_test_rewards) / len(self.init_test_rewards)
+        self.pylogger.info(f"Active search completed. Avg. test reward improved: {init_avg_reward} -> {test_avg_reward}")
+        super().on_train_end()
