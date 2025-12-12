@@ -4,6 +4,7 @@ import time
 import json
 import logging
 import functools
+import traceback as tb
 from omegaconf import OmegaConf, DictConfig
 from hydra.core.hydra_config import HydraConfig
 from typing import Any, Callable, Dict, Type, TypeVar, Union, List
@@ -146,6 +147,7 @@ class RunManager():
         self.is_multirun = hc.mode.name == "MULTIRUN"
         self.locked_device = None
         self.assert_idle = getattr(cfg, "assert_idle", True)
+        self.start_time = None
 
     @rank_zero_only
     def _enter(self):
@@ -158,6 +160,7 @@ class RunManager():
         accelerator = "gpu" if torch.cuda.is_available() else "cpu"  # TODO support MPS?
         self.cfg.train.devices = device
         self.cfg.train.accelerator = accelerator
+        self.start_time = time.time()
 
     @rank_zero_only
     def _exit(self):
@@ -173,10 +176,26 @@ class RunManager():
         self._enter()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        """Called after a job ends."""
-        logger.info("Finishing Job...")
-        self._exit()
+        """Called after a job ends. Logs traceback and delegates cleanup to _exit() on rank 0."""
+        elapsed_minutes = (time.time() - self.start_time) / 60 if self.start_time else 0
 
+        # --- Always log timing and errors, regardless of rank ---
+        if exc_type is not None:
+            logger.error("Run failed after %.2f minutes due to an exception:", elapsed_minutes)
+            formatted_tb = ''.join(tb.format_exception(exc_type, exc_value, traceback))
+            logger.error("Traceback (most recent call last):\n%s", formatted_tb)
+
+        else:
+            logger.info("Job finished successfully after %.2f minutes.", elapsed_minutes)
+
+        # --- Cleanup only on rank zero ---
+        try:
+            self._exit()
+        except Exception as e:
+            logger.error("Error during cleanup: %s", e, exc_info=True)
+
+        # Returning False ensures any exception is re-raised after logging
+        return False
 
     def set_and_lock_gpu(self, devices: Union[List[int], int, str]) -> int:
         """Acquire a GPU lock to ensure exclusivity."""

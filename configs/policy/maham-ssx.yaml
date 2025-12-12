@@ -6,9 +6,12 @@ defaults:
 policy:
   policy: maham
   use_ranking_pe: True
-  param_sharing: True
+  param_sharing: False
   decoder_attn_mask: True
-  mask_no_edge: False
+  ms_sparse_attn: True
+  use_sku_attn: False
+  ms_scores_tanh_clip: 2
+  
 env:
   name: msprp
   num_agents: null

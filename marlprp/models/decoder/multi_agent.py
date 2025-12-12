@@ -12,9 +12,9 @@ from marlprp.env.env import MultiAgentEnv
 from marlprp.env.instance import MSPRPState
 from marlprp.models.policy_args import MahamParams, ParcoParams
 from marlprp.utils.ops import gather_by_index, batchify
-from marlprp.models.encoder.base import MatNetEncoderOutput
+from marlprp.models.encoder.utils import MatNetEncoderOutput
 from marlprp.decoding.strategies import DecodingStrategy, get_decoding_strategy
-
+from marlprp.utils.config import DecodingConfig
 from .base import BaseDecoder
 from .attn import AttentionPointer
 
@@ -41,17 +41,23 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         self.shelf_decoder = MultiAgentShelfDecoder(model_params)
         self.sku_decoder = MultiAgentSkuDecoder(model_params)
 
-    def forward(self, embeddings: MatNetEncoderOutput, state: MSPRPState, env: MultiAgentEnv, return_logp = False):
+    def forward(
+        self, 
+        embeddings: MatNetEncoderOutput, 
+        state: MSPRPState, 
+        env: MultiAgentEnv, 
+        return_logp: bool = False
+    ):
         node_mask = env.get_node_mask(state)
-        next_shelves, shelf_logps = self.shelf_decoder(embeddings, state, node_mask, env)
+        next_shelves, shelf_logps = self.shelf_decoder(embeddings, state, node_mask.clone(), env, return_logp=return_logp)
 
         # partial step through the environment to get intermediate state s'
         intermediate_state = env.step(next_shelves, state)
         # get new action mask from intermediate state
         sku_mask = env.get_sku_mask(intermediate_state, next_shelves)
-        skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, sku_mask, env)
+        skus_to_pick, sku_logps = self.sku_decoder(embeddings, intermediate_state, sku_mask.clone(), env, return_logp=return_logp)
 
-        # handle conflicts
+        # handle conflicts -> i.e. agent selected a shelf which does not contain any demanded items after preceeding agents have picked their items
         conflicts = torch.logical_and(skus_to_pick["sku"] == 0, ~intermediate_state.agent_at_depot())
         current_nodes = state.current_location[conflicts]
         current_agent = conflicts.nonzero()[:, 1]
@@ -65,8 +71,7 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
             batch_size=current_nodes.shape
         )
         next_shelves[conflicts] = current_action
-        shelf_logps[conflicts] = 0
-
+        
         # step through environment with handled conflicts to get next state
         intermediate_state = env.step(next_shelves, state)
         next_state = env.step(skus_to_pick, intermediate_state)
@@ -76,19 +81,20 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
 
         return_dict = {"state": state, "action": actions, "next": next_state, "action_mask": masks}
         if return_logp:
+            shelf_logps[conflicts] = 0.0
             logps = TensorDict({"shelf": shelf_logps, "sku": sku_logps}, batch_size=shelf_logps.batch_size)
             return_dict["logprobs"] = logps
 
         return TensorDict(return_dict, batch_size=state.batch_size, device=state.device)
     
-    def get_logp_of_action(self, embeddings, actions: TensorDict, masks: TensorDict, state: MSPRPState):
-        state = state.clone()
-        masks = masks.clone()
-        actions = actions.clone()
+    def get_logp_of_action(self, embeddings, state: MSPRPState, action: torch.Tensor, action_mask: torch.Tensor, env: MultiAgentEnv):
+        state: MSPRPState = state.clone()
+        actions = action.clone()
+        masks = action_mask.clone()
         assert (actions["shelf"]["agent"] == actions["sku"]["agent"]).all()
 
         shelf_action = actions["shelf"]
-        shelf_mask = masks["shelf"]
+        shelf_mask = masks["shelf"].clone()
         bs, n_agents, _ = shelf_mask.shape
         # unmask the "stay" action, where the agent simply stays at current node. This is 
         # selected in case of conflicts
@@ -115,10 +121,15 @@ class HierarchicalMultiAgentDecoder(BaseDecoder):
         loss_mask = state.agent_pad_mask.gather(1, actions["shelf"]["agent"])
         return action_logp, entropy, loss_mask
     
-    def _set_decode_strategy(self, decode_type, **kwargs):
-        self.dec_strategy = get_decoding_strategy(decode_type, **kwargs)
+    def _set_decode_strategy(self, decoding_params: DecodingConfig):
+        self.dec_strategy = get_decoding_strategy(decoding_params)
         self.shelf_decoder.dec_strategy = self.dec_strategy
         self.sku_decoder.dec_strategy = self.dec_strategy
+
+
+    def compute_cache(self, embeddings):
+        self.shelf_decoder.compute_cache(embeddings)
+        self.sku_decoder.compute_cache(embeddings)
 
 
 
@@ -142,6 +153,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         state: MSPRPState,
         mask: torch.Tensor,
         env: MultiAgentEnv,
+        return_logp: bool = False
     ):
         num_agents = state.num_agents
         # get logits and mask
@@ -154,11 +166,10 @@ class BaseMultiAgentDecoder(BaseDecoder):
         busy_agents = []
         while not mask.all():
             
-            logp, step_mask = self._logits_to_logp(logits, mask)
-
-            action, logp = self.dec_strategy.step(logp, step_mask, state, key=self.key)
-            
+            logp = self._logits_to_logp(logits, mask)
+            action, logp = self.dec_strategy.step(logp, return_logp=return_logp)
             action = self._translate_action(action, state, env)
+
             actions.append(action)
             logps.append(logp)
             busy_agents.append(action["agent"])
@@ -180,10 +191,14 @@ class BaseMultiAgentDecoder(BaseDecoder):
         actions = actions.gather(1, agent_sort_idx)
         actions["precedence"] = precedence
         actions = pad(actions, pad_size, value=0)
-        # NOTE we sort logps in ascending order of agent idx
-        logps = torch.stack(logps, dim=1)
-        logps = logps.gather(1, agent_sort_idx)
-        logps = F.pad(logps, pad_size, "constant", 0)
+        
+        if return_logp:
+            # NOTE we sort logps in ascending order of agent idx
+            logps = torch.stack(logps, dim=1)
+            logps = logps.gather(1, agent_sort_idx)
+            logps = F.pad(logps, pad_size, "constant", 0)
+        else:
+            logps = None
 
         return actions, logps
 
@@ -215,7 +230,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         # get logits and mask once
         logits = self.pointer(embeddings, state)
         # (bs, num_actions)
-        logp, _ = self._logits_to_logp(logits, mask)
+        logp = self._logits_to_logp(logits, mask)
 
         #(bs, num_agents)
         selected_logp = gather_by_index(logp, action_indices, dim=1, squeeze=False)
@@ -245,7 +260,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
         for rank, action_idx in enumerate(action_indices):
             agent = action["precedence"][:, rank]
             # (bs, num_actions)
-            logp, _ = self._logits_to_logp(logits, mask)
+            logp = self._logits_to_logp(logits, mask)
             #(bs, 1)
             selected_logp = gather_by_index(logp, action_idx, dim=1, squeeze=False)
             selected_logps.append(selected_logp)
@@ -277,7 +292,7 @@ class BaseMultiAgentDecoder(BaseDecoder):
             logits, mask = self._prepare_logits_for_rollout(logits, mask)
             logp = self.dec_strategy.logits_to_logp(logits=logits, mask=mask)
             
-        return logp, mask
+        return logp
 
     
     def _prepare_logits_for_rollout(self, logits: torch.Tensor, mask: torch.Tensor):
@@ -309,6 +324,8 @@ class BaseMultiAgentDecoder(BaseDecoder):
 
         logits = rearrange(logits, "b a s -> b (s a)")
         return logits, mask
+    
+
 
 ################################################################
 #########################  DECODER #############################
@@ -355,7 +372,8 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             selected_shelf.view(bs, 1, 1).expand(-1, num_agents, 1), 
             True
         )[..., state.num_depots:]
-
+        # calculate the remaining demand; (bs, 1)
+        remaining_demand = state.demand.sum(-1, keepdim=True)
         if not env.is_multitour_instance:
             # in case of "one tour per agent" instanes (i.e. num_agents=None), an agent may only return to the depot if
             # all other active agents have enough capacity to pick all remaining items. If one agent returns to the depot,
@@ -370,16 +388,30 @@ class MultiAgentShelfDecoder(BaseMultiAgentDecoder):
             mask = torch.eye(state.num_agents, device=state.device).bool().unsqueeze(0).expand_as(remaining_capacity_expanded)
             # (bs, num_agents)
             capacity_of_other_agents = remaining_capacity_expanded.masked_fill(mask, 0).sum(-1)
-            remaining_demand = state.demand.sum(-1, keepdim=True)
-            mask_depot = capacity_of_other_agents.lt(remaining_demand) & remaining_demand.gt(0)
+            # mask depot for all agents if their combined capacity is insufficient to cover remaining demand. 
+            # Mask depot also for agents already at depot to make sure they stay in the depot they are at
+            mask_depot = (capacity_of_other_agents.lt(remaining_demand) & remaining_demand.gt(0)) | state.agent_at_depot()
             # (bs, num_agents ,num_depots)
             mask_depot = mask_depot.unsqueeze(-1).repeat(1, 1, state.num_depots)
             updated_mask[..., :state.num_depots] = mask_depot
+
+        if env.use_stay_token:
+
+            active_agents = ~state.agent_at_depot().unsqueeze(1).expand(bs, num_agents, num_agents)
+            mask = ~torch.eye(num_agents, dtype=torch.bool, device=state.device)
+            # Apply mask to exclude the diagonal; (bs, num_agents)
+            other_active_agents = active_agents[:, mask].view(bs, num_agents, num_agents - 1).any(dim=2)
+            #
+            rem_demand_and_other_active_agents = remaining_demand.gt(0) & other_active_agents
+            # if we enable the stay_token, idle agents can always select to stay at their current location if there is remaining demand
+            updated_mask.scatter_(-1, state.current_location.view(bs, num_agents, 1), ~rem_demand_and_other_active_agents[...,None])
+
         # We have to make sure all idle agents can select some action. Therefore, we first need to determine 
         # which idle agents have no feasible action left (since all their feasible nodes were selected already)...
         no_action_left = updated_mask.all(-1)
         # and then we let these agents wait at their current location
         updated_mask[no_action_left] = ~state.current_loc_ohe[no_action_left].bool()
+
         # all actions of busy agents are masked
         updated_mask = updated_mask.scatter(-2, busy_agents.view(bs, -1, 1).expand(bs, -1, num_nodes), True)
 
@@ -474,9 +506,9 @@ class BaseParcoDecoder(BaseDecoder):
         # bs, num_agents, num_actions
         logits = self.pointer(embeddings, state, attn_mask=attn_mask)
         # (bs * num_agents), num_actions
-        logps, step_mask = self._logits_to_logp(logits, mask)
+        logps = self._logits_to_logp(logits, mask)
         # (bs * num_agents)
-        actions, logps = self.dec_strategy.step(logps, step_mask, state, key=self.key)
+        actions, logps = self.dec_strategy.step(logps)
         # (bs, num_agents)
         actions = rearrange(actions, "(b a) -> b a", a=state.num_agents)
         logps = rearrange(logps, "(b a) -> b a", a=state.num_agents)
@@ -504,14 +536,14 @@ class BaseParcoDecoder(BaseDecoder):
             mask = rearrange(mask, "b a s -> (b a) s")
         return logp, mask
 
-    def get_logp_of_action(self,  embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
+    def get_logp_of_action(self, embeddings: TensorDict, action: TensorDict, mask: torch.Tensor, state: MSPRPState):
         # get action indices
         action_indices = action["idx"].clone()
 
         # get logits and mask once
         logits = self.pointer(embeddings, state)
         # (bs, num_actions)
-        logp, _ = self._logits_to_logp(logits, mask)
+        logp = self._logits_to_logp(logits, mask)
 
         #(bs, num_agents)
         selected_logp = gather_by_index(logp, action_indices, dim=2, squeeze=True)
@@ -530,6 +562,7 @@ class BaseParcoDecoder(BaseDecoder):
             masked_priorities = torch.arange(state.num_agents, device=state.device).flip(dims=(0,)).view(1, -1).repeat(logp.size(0), 1)
         precedence = torch.argsort(masked_priorities, dim=1, descending=True)
         return precedence
+
 
 class ParcoShelfDecoder(BaseParcoDecoder):
 

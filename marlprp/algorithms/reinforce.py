@@ -11,7 +11,7 @@ from marlprp.utils.config import (
     TrainingParams, 
     ValidationParams, 
     TestParams, 
-    save_config_to_dict
+    config_to_dict
 )
 
 
@@ -58,7 +58,7 @@ class REINFORCE(LearningAlgorithm):
     
     def _get_optimizer(self):
 
-        optimizer_kwargs = save_config_to_dict(self.train_params.optimizer_kwargs)
+        optimizer_kwargs = config_to_dict(self.train_params.optimizer_kwargs)
         policy_lr = optimizer_kwargs.pop("policy_lr")
         baseline_lr = optimizer_kwargs.pop("baseline_lr", None)
         baseline_lr = baseline_lr or policy_lr

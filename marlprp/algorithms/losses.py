@@ -6,25 +6,21 @@ def ce_loss(
         logp: torch.Tensor, 
         entropy: torch.Tensor, 
         mask: torch.Tensor = None, 
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0,
         **kwargs
     ):
-
+    """standard cross entropy loss"""
+    assert logp.dim() == entropy.dim(), f"Logprobs and Entropy shapes dont match: {logp.shape} vs. {entropy.shape}"
+    
     bs = logp.size(0)
     if mask is not None:
         logp[mask] = 0
         entropy[mask] = 0
-        denom = mask.view(bs, -1).logical_not().sum(1) + 1e-6
 
     # add entropy penalty 
-    loss = torch.clamp(-logp - entropy_coef * entropy, min=0)
+    loss = torch.clamp(logp + entropy_coef * entropy, max=0)
 
-    if mask is not None:
-        loss = loss.view(bs, -1).sum(1) / denom
-    else:
-        loss = loss.view(bs, -1).mean(1)
-    return loss
-    #return loss.sum(1)
+    return -loss.view(bs, -1).sum(1)
 
 
 
@@ -32,28 +28,29 @@ def simple_listnet_loss(
         logp: torch.Tensor, 
         entropy: torch.Tensor, 
         mask: torch.Tensor = None, 
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0,
         **kwargs
     ):
-
+    """This ListNet assumes uniform distribution of the 'correct' agent action, i.e. the target distribution
+    for an expert action is 1/M (with M the number of agents) and 0 else. In this case, we can simply scale the
+    CE loss by M, since sum_i p_i (log (q_i)) = p sum_i log(q_i) if p=p_i for all i
+    """
+    assert logp.dim() == entropy.dim(), f"Logprobs and Entropy shapes dont match: {logp.shape} vs. {entropy.shape}"
     bs = logp.size(0)
-    # (bs, num_actions)
-    logp = logp.view(bs, -1)
-    
-    y_true = torch.ones_like(logp)
-    target_dist = F.softmax(y_true, dim=-1)
     if mask is not None:
-        target_dist[mask] = 0
-        entropy[mask] = 0  # for masked entries, simply add no penalty
+        logp[mask] = 0
+        entropy[mask] = 0
+        denom = mask.view(bs, -1).logical_not().sum(1) + 1e-6
 
-    # (bs, actions)
-    ce_loss = -torch.mul(target_dist, logp)
-    loss = torch.clamp(ce_loss - entropy_coef * entropy, min=0)
-        
-    loss = loss.sum(-1)
+    # add entropy penalty 
+    loss = torch.clamp(logp + entropy_coef * entropy, max=0)
 
-    return loss
+    if mask is not None:
+        loss = loss.view(bs, -1).sum(1) / denom
+    else:
+        loss = loss.view(bs, -1).mean(1)
 
+    return -loss
 
 
 # def listnet_loss(
